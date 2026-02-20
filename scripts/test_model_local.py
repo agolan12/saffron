@@ -59,12 +59,33 @@ def make_dataloaders(batch_size=32):
         #v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),  # ImageNet-style
 		])
     
-    images_path = Path("/gscratch/cheme/nlsschim/data/microglia_data/ml_images/split_tifs/")
+    images_path = Path("/gscratch/cheme/agolan/data/preprocessed_data")
     # images = data_io.load_images_from_directory(images_path)
+    
+    # DEBUG: Check directory structure
+    print(f"\n{'='*60}")
+    print(f"DEBUG: Checking directory structure")
+    print(f"{'='*60}")
+    print(f"Base path: {images_path}")
+    print(f"Path exists: {images_path.exists()}")
+    print(f"Is directory: {images_path.is_dir()}")
+    
+    # Check subdirectories
+    for label in ['ferret', 'human', 'mice', 'pig', 'rabbit', 'rat']:
+        subdir = images_path / label
+        print(f"\n{label} directory:")
+        print(f"  Path: {subdir}")
+        print(f"  Exists: {subdir.exists()}")
+        if subdir.exists():
+            npy_files = list(subdir.rglob("*.npy"))
+            print(f"  .npy files found: {len(npy_files)}")
+            if npy_files:
+                print(f"  Example files: {[f.name for f in npy_files[:3]]}")
+    print(f"{'='*60}\n")
 
     microglia_dataset = MicrogliaDataset(images_path,
                                          train=True,
-                                         labels=['HC', 'OGD', 'ROT'],
+                                         labels=['ferret', 'human', 'mice', 'pig', 'rabbit', 'rat'],
                                          transform=transforms)
     print(microglia_dataset.length)
 

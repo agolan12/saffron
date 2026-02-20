@@ -4,7 +4,6 @@ from torch.utils.data import Dataset, DataLoader
 from typing import List, Tuple
 from pathlib import Path
 
-
 def get_random_patch_position(image_shape: Tuple[int, int], patch_size: int) -> Tuple[int, int]:
     """
     Generate random top-left position for a patch.
@@ -86,6 +85,135 @@ class PatchPairDataset(Dataset):
             'positive_patch': positive_patch,
             'negative_patches': negative_patches
         }
+
+# test class added by assaf
+class MicrogliaDataset(Dataset):
+    """Supervised dataset for microglia classification."""
+    
+    def __init__(self, data_dir, train=True, labels=['HC', 'OGD', 'ROT'], transform=None):
+        """
+        Args:
+            data_dir: Path to directory containing subdirectories for each label
+            train: Not used, kept for compatibility
+            labels: List of class labels (should match subdirectory names)
+            transform: Optional transforms to apply
+        """
+        self.data_dir = Path(data_dir)
+        self.labels = labels
+        self.label_to_idx = {label: idx for idx, label in enumerate(labels)}
+        self.transform = transform
+        self.samples = []
+        
+        # Load files from each label subdirectory
+        for label in labels:
+            label_dir = self.data_dir / label
+            
+            if not label_dir.exists():
+                print(f"Warning: Directory {label_dir} does not exist, skipping...")
+                continue
+            
+            # Get all .npy files in this label's directory
+            for filepath in label_dir.rglob("*.npy"):
+                self.samples.append((str(filepath), self.label_to_idx[label]))
+        
+        self.length = len(self.samples)
+        print(f"Loaded {self.length} images from {data_dir}")
+        print(f"Class distribution: {self._get_class_distribution()}")
+    
+    def _get_class_distribution(self):
+        """Count samples per class."""
+        counts = {label: 0 for label in self.labels}
+        for _, label_idx in self.samples:
+            label_name = self.labels[label_idx]
+            counts[label_name] += 1
+        return counts
+    
+    def __len__(self):
+        return self.length
+    
+    def __getitem__(self, idx):
+        image_path, label = self.samples[idx]
+        
+        # Load .npy file
+        image = np.load(image_path)  # Shape: (H, W), float32, already normalized
+        
+        # Convert to tensor and add channel dimension
+        image = torch.from_numpy(image).unsqueeze(0).float()  # (1, H, W)
+        
+        # Apply transforms if provided
+        if self.transform:
+            image = self.transform(image)
+        
+        return image, label
+
+
+def generate_dataloaders(dataset, num_workers=2, batch_size=32, val_split=0.2):
+    """
+    Split dataset into train/val and create DataLoaders.
+    
+    Args:
+        dataset: MicrogliaDataset instance
+        num_workers: Number of worker processes
+        batch_size: Batch size
+        val_split: Fraction of data for validation
+    
+    Returns:
+        train_loader, val_loader
+    """
+    from torch.utils.data import random_split, WeightedRandomSampler
+    
+    # Calculate split sizes
+    total_size = len(dataset)
+    val_size = int(total_size * val_split)
+    train_size = total_size - val_size
+    
+    # Split dataset
+    train_dataset, val_dataset = random_split(
+        dataset, 
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)  # For reproducibility
+    )
+    
+    print(f"Train size: {train_size}, Val size: {val_size}")
+    
+    # Get class counts for training set
+    train_labels = [dataset.samples[i][1] for i in train_dataset.indices]
+    class_counts = np.bincount(train_labels)
+    
+    print(f"\nClass distribution in training set:")
+    for idx, label in enumerate(dataset.labels):
+        print(f"  {label}: {class_counts[idx]} samples")
+    
+    # Calculate weights for each sample (inverse of class frequency)
+    class_weights = 1.0 / class_counts
+    sample_weights = [class_weights[label] for label in train_labels]
+    
+    # Create weighted sampler
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+    
+    # Create DataLoaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        sampler=sampler, # weighted sampler instead of shuffle
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    return train_loader, val_loader
+
 
 
 def create_dataloaders(train_files: List[str],

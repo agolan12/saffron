@@ -147,7 +147,7 @@ def main():
     print("starting script")
 
     train_files, val_files, test_files = load_split_files(
-        split_dir="/gscratch/cheme/nlsschim/data/cross_species/preprocessed_data/split_data"
+        split_dir="/gscratch/cheme/agolan/data/preprocessed_data/split_data"
         )
 
     train_loader, val_loader, test_loader = create_dataloaders(
@@ -155,7 +155,7 @@ def main():
         val_files=val_files, test_files=test_files,
         num_workers=4,
         batch_size=32,
-        n_negatives=1,
+        n_negatives=5,
         patch_size=128)
 
 
@@ -181,7 +181,7 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = ContrastiveModel(backbone_type='resnet18', pretrained=False, input_channels=1).to(device)
-    loss_fn = ContrastiveLoss(temperature=0.07)
+    loss_fn = ContrastiveLoss(temperature=0.5)
     optimizer = Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)  # Was 1e-5
 
     print(f"Device: {device}")

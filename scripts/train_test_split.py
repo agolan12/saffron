@@ -10,7 +10,7 @@ from pathlib import Path
 import argparse
 import shutil
 from typing import List
-from saffron.data.data_processing import train_test_split_by_animal
+from src.saffron.data.data_processing import train_test_split_by_animal
 
 
 def get_npy_files(directory: str) -> List[str]:
