@@ -1,6 +1,6 @@
-from .models.loss_functions import ContrastiveLoss
+from .models.loss_functions import ContrastiveLoss, SupConLoss
 
 __all__ = [
     'ContrastiveLoss',
-    # ... keep existing exports like ContrastiveModel, etc.
+    'SupConLoss',
 ]

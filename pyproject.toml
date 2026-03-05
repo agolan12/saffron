@@ -57,6 +57,7 @@ dev = [
 torch = [
     "torch>=1.12.0",
     "torchvision>=0.13.0",
+    "pytorch-metric-learning>=2.0.0",
 ]
 all = [
     "saffron[test,dev,torch]"
@@ -152,6 +153,7 @@ module = [
     "cv2.*",
     "skimage.*",
     "tifffile.*",
+    "pytorch_metric_learning.*",
 ]
 ignore_missing_imports = true
 

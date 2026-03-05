@@ -3,11 +3,30 @@ Pipeline Component 5: Contrastive Loss Function
 
 Loss function for training the contrastive learning model.
 Pulls positive patches close, pushes negative patches away.
+
+Also re-exports SupConLoss from pytorch-metric-learning for supervised
+contrastive learning (use with embeddings and class labels).
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+try:
+    from pytorch_metric_learning.losses import SupConLoss as _SupConLoss
+
+    def SupConLoss(temperature: float = 0.07, **kwargs):
+        """Supervised contrastive loss from pytorch-metric-learning.
+
+        Usage:
+            loss_fn = SupConLoss(temperature=0.07)
+            embeddings = model(images)  # (B, embedding_dim)
+            loss = loss_fn(embeddings, labels)  # labels: (B,) class indices
+        """
+        return _SupConLoss(temperature=temperature, **kwargs)
+
+except ImportError:
+    SupConLoss = None  # type: ignore[misc, assignment]
 
 
 class ContrastiveLoss(nn.Module):
@@ -69,25 +88,25 @@ class ContrastiveLoss(nn.Module):
 
 if __name__ == "__main__":
     print("Testing ContrastiveLoss...")
-    
+
     # Create dummy model
     class DummyModel(nn.Module):
         def forward(self, x):
             # Simple flatten and linear projection
             b = x.shape[0]
             return torch.randn(b, 128)  # Return random embeddings
-    
+
     model = DummyModel()
     loss_fn = ContrastiveLoss(temperature=0.07)
-    
+
     # Create dummy batch
     masked_images = torch.randn(4, 1, 256, 256)
     positive_patches = torch.randn(4, 1, 64, 64)
     negative_patches = torch.randn(4, 3, 1, 64, 64)
-    
+
     # Compute loss
     loss = loss_fn(model, masked_images, positive_patches, negative_patches)
-    
+
     print(f"Loss value: {loss.item():.4f}")
     print(f"Loss is scalar: {loss.shape == torch.Size([])}")
     print("\n✓ Loss function test passed!")
