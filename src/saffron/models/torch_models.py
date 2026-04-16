@@ -16,7 +16,7 @@ class MicrogliaCNN(torch.nn.Module):
     Handles 512x512 grayscale images.
     """
 
-    def __init__(self, input_size=512, num_classes=3):
+    def __init__(self, input_size=512, num_classes=6):
         super(MicrogliaCNN, self).__init__()
         
         self.cnn1 = nn.Sequential(
