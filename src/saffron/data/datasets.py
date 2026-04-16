@@ -90,31 +90,37 @@ class PatchPairDataset(Dataset):
 class MicrogliaDataset(Dataset):
     """Supervised dataset for microglia classification."""
     
-    def __init__(self, data_dir, train=True, labels=['HC', 'OGD', 'ROT'], transform=None):
+    def __init__(self, data_dir, train=True, labels=['HC', 'OGD', 'ROT'], 
+    transform=None, merge_map=None):
         """
         Args:
             data_dir: Path to directory containing subdirectories for each label
             train: Not used, kept for compatibility
             labels: List of class labels (should match subdirectory names)
             transform: Optional transforms to apply
+            merge_map: Option map to merge labeled groups
         """
         self.data_dir = Path(data_dir)
         self.labels = labels
         self.label_to_idx = {label: idx for idx, label in enumerate(labels)}
         self.transform = transform
+        self.merge_map = merge_map or {}
         self.samples = []
         
         # Load files from each label subdirectory
+        dirs_to_scan = []
         for label in labels:
-            label_dir = self.data_dir / label
-            
+            dirs_to_scan.append((label, label))  # (dir_name, label_name)
+        for dir_name, label_name in self.merge_map.items():
+            dirs_to_scan.append((dir_name, label_name))
+
+        for dir_name, label_name in dirs_to_scan:
+            label_dir = self.data_dir / dir_name
             if not label_dir.exists():
                 print(f"Warning: Directory {label_dir} does not exist, skipping...")
                 continue
-            
-            # Get all .npy files in this label's directory
             for filepath in label_dir.rglob("*.npy"):
-                self.samples.append((str(filepath), self.label_to_idx[label]))
+                self.samples.append((str(filepath), self.label_to_idx[label_name]))
         
         self.length = len(self.samples)
         print(f"Loaded {self.length} images from {data_dir}")
