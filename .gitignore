@@ -1,4 +1,5 @@
 # data
+*.png
 *.csv
 *.zip
 *.npy
