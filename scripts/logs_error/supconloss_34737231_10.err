@@ -1,0 +1,7 @@
+/gscratch/cheme/agolan/miniconda3/envs/contrastive_ml/lib/python3.10/site-packages/umap/__init__.py:36: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+usage: supconloss_test_old.py [-h] [-d {cpu,cuda,mps}] [-e EPOCHS]
+                              [--split SPLIT] [-b BATCH_SIZE]
+                              [-l LEARNING_RATE] [--decay DECAY] [-w WEIGHTS]
+                              [-v]
+supconloss_test_old.py: error: argument -l/--learning_rate: invalid float value: ''

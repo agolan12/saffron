@@ -1,5 +1,0 @@
-critical libmamba Cannot activate, prefix does not exist at: '/mmfs1/gscratch/cheme/nlsschim/phys417_env'
-Traceback (most recent call last):
-  File "/mmfs1/gscratch/cheme/nlsschim/saffron/scripts/test_model_local.py", line 1, in <module>
-    import torch
-ModuleNotFoundError: No module named 'torch'

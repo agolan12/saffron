@@ -105,53 +105,72 @@ def make_dataloaders(batch_size=32):
                 print(f"  Example files: {[f.name for f in npy_files[:3]]}")
     print(f"{'='*60}\n")
 
-    microglia_dataset = MicrogliaDataset(images_path,
-                                         train=True,
-                                         labels=['mice', 'rat', 'gyrified'],
-                                         transform=transforms,
-                                         merge_map={
-                                         'human' : 'gyrified',
-                                         'ferret' : 'gyrified',
-                                         'pig' : 'gyrified',
-                                        })
+    microglia_dataset = MicrogliaDataset(
+        images_path,
+        train=True,
+        labels=["mice", "rat", "gyrified"],
+        transform=transforms,
+        merge_map={"human": "gyrified", "ferret": "gyrified", "pig": "gyrified"},
+    )
+
+    # Dataset with all 5 species — used only for the species UMAP
+    species_dataset = MicrogliaDataset(
+        images_path,
+        train=True,
+        labels=["mice", "rat", "human", "ferret", "pig"],
+        transform=transforms,
+    )
+
     print(microglia_dataset.length)
 
     data_train, data_val = generate_dataloaders(microglia_dataset, num_workers=2, batch_size=batch_size)
+    _, species_val = generate_dataloaders(species_dataset, num_workers=2, batch_size=batch_size)
 
-    return data_train, data_val
-    
-    
-def visualize_embeddings(embedding_model, dataloader, device, epoch, method="both"):
+    return data_train, data_val, species_val
+
+
+def visualize_embeddings(
+    embedding_model, dataloader, species_dataloader, device, epoch, job_id="local", task_id="0"
+):
     """
-    Collect embeddings from the val set and plot UMAP and/or t-SNE.
-    method: "umap", "tsne", or "both"
+    Produces two UMAPs saved to fig/:
+      1. Gyrified vs non-gyrified (merged labels: mice, rat, gyrified)
+      2. All 5 species separately (human, ferret, pig, rat, mice)
+
+    Filenames include the SLURM job/task ID.
     """
     embedding_model.eval()
-    all_embeddings = []
-    all_labels = []
-
-    with torch.no_grad():
-        for _, (images, labels) in enumerate(dataloader):
-            images = images.to(device)
-            embs = embedding_model(images).cpu().numpy()
-            all_embeddings.append(embs)
-            all_labels.extend(labels.numpy())
-
-    all_embeddings = np.concatenate(all_embeddings, axis=0)
-    all_labels = np.array(all_labels)
-    label_names = {0: "mice", 1: "rat", 2: "gyrified"}
-    colors = ["steelblue", "tomato", "yellow"]
-
     Path("fig").mkdir(exist_ok=True)
 
-    def _scatter(reduced, title, filepath):
+    def collect_embeddings(loader):
+        all_embs, all_lbls = [], []
+        with torch.no_grad():
+            for _, (images, labels) in enumerate(loader):
+                images = images.to(device)
+                embs = embedding_model(images).cpu().numpy()
+                all_embs.append(embs)
+                if isinstance(labels, torch.Tensor):
+                    lbl = labels.detach().cpu().numpy()
+                else:
+                    lbl = np.asarray(labels)
+                all_lbls.extend(lbl)
+        return np.concatenate(all_embs, axis=0), np.array(all_lbls)
+
+    def run_umap(embeddings):
+        reducer = umap.UMAP(n_components=2, random_state=42)
+        return reducer.fit_transform(embeddings)
+
+    def scatter(reduced, labels_arr, label_names, colors, title, filepath):
         plt.figure(figsize=(7, 6))
         for cls_idx, cls_name in label_names.items():
-            mask = all_labels == cls_idx
+            mask = labels_arr == cls_idx
             plt.scatter(
-                reduced[mask, 0], reduced[mask, 1],
-                label=cls_name, alpha=0.6, s=18,
-                color=colors[cls_idx]
+                reduced[mask, 0],
+                reduced[mask, 1],
+                label=cls_name,
+                alpha=0.6,
+                s=18,
+                color=colors[cls_idx],
             )
         plt.title(f"{title} — Epoch {epoch}")
         plt.legend()
@@ -160,21 +179,61 @@ def visualize_embeddings(embedding_model, dataloader, device, epoch, method="bot
         plt.close()
         print(f"[+] Saved {filepath}")
 
-    if (method in ("tsne", "both")):
-        perplexity = min(30, len(all_embeddings) - 1)
-        tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42, n_iter=1000)
-        reduced_tsne = tsne.fit_transform(all_embeddings)
-        _scatter(reduced_tsne, "t-SNE of Embeddings", f"fig/tsne_epoch{epoch:03d}.png")
+    # UMAP 1: gyrified vs non-gyrified
+    embs_merged, lbls_merged = collect_embeddings(dataloader)
+    reduced_merged = run_umap(embs_merged)
+    scatter(
+        reduced_merged,
+        lbls_merged,
+        label_names={0: "mice", 1: "rat", 2: "gyrified"},
+        colors={0: "steelblue", 1: "tomato", 2: "gold"},
+        title="UMAP — Gyrified vs Non-Gyrified",
+        filepath=f"fig/umap_gyrified_job{job_id}_task{task_id}_epoch{epoch:03d}.png",
+    )
 
-    if (method in ("umap", "both")):
-        reducer = umap.UMAP(n_components=2, random_state=42)
-        reduced_umap = reducer.fit_transform(all_embeddings)
-        _scatter(reduced_umap, "UMAP of Embeddings", f"fig/umap_epoch_gyrified_lr0001_ce30_{epoch:03d}.png")
-    """ elif method in ("umap", "both") and not UMAP_AVAILABLE:
-        print("[!] umap-learn not installed. Run: pip install umap-learn") """
+    # UMAP 2: all 5 species
+    embs_species, lbls_species = collect_embeddings(species_dataloader)
+    reduced_species = run_umap(embs_species)
+    scatter(
+        reduced_species,
+        lbls_species,
+        label_names={0: "mice", 1: "rat", 2: "human", 3: "ferret", 4: "pig"},
+        colors={
+            0: "steelblue",
+            1: "tomato",
+            2: "gold",
+            3: "mediumseagreen",
+            4: "mediumpurple",
+        },
+        title="UMAP — All Species",
+        filepath=f"fig/umap_species_job{job_id}_task{task_id}_epoch{epoch:03d}.png",
+    )
 
 
-def train(model, embedding_model, weights, epochs, data, device, loss_func, optimizer, ce_weight=0.5):
+def freeze_backbone(model):
+    """Freeze everything except the last two FC layers."""
+    for param in model.cnn.cnn1.parameters():
+        param.requires_grad = False
+    for param in model.cnn.cnn2.parameters():
+        param.requires_grad = False
+    # fc1 and fc2 remain trainable
+    print("[+] Backbone frozen. Only fc1 and fc2 are trainable.")
+
+def train(
+    model,
+    embedding_model,
+    weights,
+    epochs,
+    data,
+    species_val,
+    device,
+    loss_func,
+    optimizer,
+    ce_weight=0.5,
+    stage=1,
+    job_id="local",
+    task_id="0",
+):
     """Train with SupConLoss on embeddings + CrossEntropy on logits to train classifier head.
     ce_weight controls the blend: total_loss = (1 - ce_weight) * supcon + ce_weight * ce
     """
@@ -198,16 +257,18 @@ def train(model, embedding_model, weights, epochs, data, device, loss_func, opti
             images = images.to(device)
             labels = labels.to(device)
 
-            # SupConLoss expects (embeddings, labels); embeddings from penultimate layer
-            embeddings = embedding_model(images)
-            supcon_loss = loss_func(embeddings, labels)
-
             # CrossEntropy on logits trains the classifier head
             logits = model(images)
             ce_loss = ce_loss_func(logits, labels)
 
-            # Combined loss: SupCon shapes embeddings, CE trains the head
-            loss = (1 - ce_weight) * supcon_loss + ce_weight * ce_loss
+            # Stage 1: SupCon + CE. Stage 2: CE only
+            if stage == 1:
+                embeddings = embedding_model(images)
+                supcon_loss = loss_func(embeddings, labels)
+                loss = (1 - ce_weight) * supcon_loss + ce_weight * ce_loss
+            else:
+                loss = ce_loss
+                
             train_loss_batch.append(loss.item())
 
             optimizer.zero_grad()
@@ -249,9 +310,13 @@ def train(model, embedding_model, weights, epochs, data, device, loss_func, opti
         # Visualize embeddings every 5 epochs (or every epoch if you prefer)
         if (epoch + 1) % 5 == 0 or epoch == 0:
             visualize_embeddings(
-                embedding_model, data_val, device,
+                embedding_model,
+                data_val,
+                species_val,
+                device,
                 epoch=epoch + 1,
-                method="umap"  # "tsne", "umap", or "both"
+                job_id=job_id,
+                task_id=task_id,
             )
 
         pbar_epoch.set_postfix({
@@ -310,7 +375,7 @@ if __name__ == "__main__":
 					type=int, 
 					help="Batch size for training.")
     parser.add_argument("-l", "--learning_rate",
-					default=0.0001, 
+					default=0.003, 
 					type=float, 
 					help="Learning rate for the optimizer.")
     parser.add_argument("--decay",
@@ -325,7 +390,19 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-	# Set up logging
+    # Print all parameters to stdout (shows up in .out file)
+    print("=" * 60)
+    print("RUN PARAMETERS")
+    print("=" * 60)
+    for arg, val in vars(args).items():
+        print(f"  {arg:<20} = {val}")
+    job_id = os.environ.get("SLURM_ARRAY_JOB_ID") or os.environ.get("SLURM_JOB_ID", "local")
+    task_id = os.environ.get("SLURM_ARRAY_TASK_ID", "0")
+    print(f"  {'slurm_job_id':<20} = {job_id}")
+    print(f"  {'slurm_task_id':<20} = {task_id}")
+    print("=" * 60)
+
+    # Set up logging
     logging.basicConfig(format="[+] %(message)s")
     logger = logging.getLogger()
     logger.setLevel(logging.NOTSET if args.verbose else logging.WARNING)
@@ -335,7 +412,7 @@ if __name__ == "__main__":
     logger.info(f"Using device: {device}")
 	
 
-    data_train, data_val = make_dataloaders(batch_size=args.batch_size)
+    data_train, data_val, species_val = make_dataloaders(batch_size=args.batch_size)
     model = MicrogliaCNN()
     embedding_model = MicrogliaEmbeddingWrapper(model)  # 500-d normalized embeddings for SupConLoss
     if SupConLoss is None:
@@ -347,14 +424,61 @@ if __name__ == "__main__":
         weight_decay=args.decay
     )
 
+    # --- Stage 1: SupCon + CE, all layers trainable ---
+    print("[+] Stage 1: Supervised contrastive learning")
     val_accuracy, val_loss, train_loss = train(
+        model=model,
+        embedding_model=embedding_model,
+        weights=args.weights,
+        epochs=100,
+        device=device,
+        data=[data_train, data_val],
+        species_val=species_val,
+        loss_func=loss_func,
+        optimizer=optimizer,
+        ce_weight=0.3,
+        stage=1,
+        job_id=job_id,
+        task_id=task_id,
+    )
+    torch.save(model.state_dict(), "weights_stage1.pt")
+    print("[+] Stage 1 weights saved to weights_stage1.pt")
+
+    # --- Stage 2: Freeze backbone, fine-tune head ---
+    print("[+] Stage 2: Fine-tuning classifier head")
+    freeze_backbone(model)
+
+    optimizer_ft = torch.optim.Adam(
+        filter(lambda p: p.requires_grad,
+               list(model.parameters()) + list(embedding_model.parameters())),
+        lr=args.learning_rate / 10,
+        weight_decay=args.decay
+    )
+
+    val_accuracy_ft, val_loss_ft, train_loss_ft = train(
         model=model,
         embedding_model=embedding_model,
         weights=args.weights,
         epochs=args.epochs,
         device=device,
         data=[data_train, data_val],
+        species_val=species_val,
         loss_func=loss_func,
-        optimizer=optimizer,
-        ce_weight=0.3,
+        optimizer=optimizer_ft,
+        ce_weight=1.0,
+        stage=2,
+        job_id=job_id,
+        task_id=task_id,
+    )
+
+    # --- Final embeddings ---
+    print("[+] Generating final embeddings")
+    visualize_embeddings(
+        embedding_model,
+        data_val,
+        species_val,
+        device,
+        epoch=999,
+        job_id=job_id,
+        task_id=task_id,
     )

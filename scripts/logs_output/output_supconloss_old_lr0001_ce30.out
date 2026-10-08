@@ -1,0 +1,52 @@
+sourcing bashrc
+Job started on g3004
+
+============================================================
+DEBUG: Checking directory structure
+============================================================
+Base path: /gscratch/cheme/agolan/data/preprocessed_data
+Path exists: True
+Is directory: True
+
+mice directory:
+  Path: /gscratch/cheme/agolan/data/preprocessed_data/mice
+  Exists: True
+  .npy files found: 2916
+  Example files: ['20230326_mouse_saline_p12_male_fs1_slide23_slice2_60x_denoised_thal1_Alexa_488_antibody_TL.npy', '20230303_mouse_saline_p12_female_fs2_slide12_slice1_60x_denoised_st2_Alexa_488_antibody_BR.npy', '20230324_mouse_saline_p12_male_ms2_slide22_slice1_10x_tilescan_denoised_marked_RGB_BL.npy']
+
+rat directory:
+  Path: /gscratch/cheme/agolan/data/preprocessed_data/rat
+  Exists: True
+  .npy files found: 2628
+  Example files: ['20230416_rat_nontreated_p13_female_f2_slide14_slice2_60x_denoised_thal3_Alexa_488_antibody_BR.npy', '20230410_rat_nontreated_p13_male_m1_slide1_slice2_60x_denoised_hipCA1_Alexa_488_antibody_TR.npy', '20230411_rat_nontreated_p13_male_m2_slide9_slice2_60x_denoised_pl3_Alexa_488_antibody_BL.npy']
+
+ferret directory:
+  Path: /gscratch/cheme/agolan/data/preprocessed_data/ferret
+  Exists: True
+  .npy files found: 552
+  Example files: ['20230306_ferret_086k_60x_denoised_WMcor2_Alexa_488_antibody_BL.npy', '20230308_ferret_085B_60x_denoised_hipDG_Alexa_488_antibody_BR.npy', '20230306_ferret_086j_60x_denoised_WMcor1_Alexa_488_antibody_BR.npy']
+
+human directory:
+  Path: /gscratch/cheme/agolan/data/preprocessed_data/human
+  Exists: True
+  .npy files found: 244
+  Example files: ['UWA-7606_A2_60X_Cortex_Image3_-_Denoised_RGB_Alexa_488_antibody_TL.npy', 'UWA-7024_A1_60X_Cortex_Image1_-_Denoised_RGB_Alexa_488_antibody_TL.npy', 'UWA-7275_D2_60X_CC_Image3_-_Denoised_RGB_Alexa_488_antibody_BL.npy']
+
+pig directory:
+  Path: /gscratch/cheme/agolan/data/preprocessed_data/pig
+  Exists: True
+  .npy files found: 736
+  Example files: ['20230313_pig_2358_D_60x_denoised_hipCA3_Alx568_TL.npy', '20230317_pig_2358_B_60x_denoised_pl2_Alx568_TR.npy', '20230313_pig_2352_D_60x_denoised_thal1_Alx568_TL.npy']
+============================================================
+
+Warning: Directory /gscratch/cheme/agolan/data/preprocessed_data/gyrified does not exist, skipping...
+Loaded 7076 images from /gscratch/cheme/agolan/data/preprocessed_data
+Class distribution: {'mice': 2916, 'rat': 2628, 'gyrified': 1532}
+7076
+Train size: 5661, Val size: 1415
+
+Class distribution in training set:
+  mice: 2315 samples
+  rat: 2097 samples
+  gyrified: 1249 samples
+[+] Saved fig/umap_epoch_gyrified_lr0001_ce30_001.png

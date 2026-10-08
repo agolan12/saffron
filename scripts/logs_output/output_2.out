@@ -1,0 +1,30 @@
+sourcing bashrc
+Job started on g3015
+
+============================================================
+DEBUG: Checking directory structure
+============================================================
+Base path: /gscratch/cheme/agolan/data/Training
+Path exists: True
+Is directory: True
+
+HC directory:
+  Path: /gscratch/cheme/agolan/data/Training/HC
+  Exists: True
+  .npy files found: 0
+
+OGD directory:
+  Path: /gscratch/cheme/agolan/data/Training/OGD
+  Exists: True
+  .npy files found: 0
+
+ROT directory:
+  Path: /gscratch/cheme/agolan/data/Training/ROT
+  Exists: True
+  .npy files found: 0
+============================================================
+
+Loaded 4864 images from /gscratch/cheme/agolan/data/Training
+Class distribution: {'HC': 784, 'OGD': 2512, 'ROT': 1568}
+4864
+Train size: 3892, Val size: 972
