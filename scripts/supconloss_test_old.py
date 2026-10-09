@@ -224,12 +224,12 @@ def visualize_embeddings(
 
 def freeze_backbone(model):
     """Freeze everything except the last two FC layers."""
-    for param in model.cnn.cnn1.parameters():
+    for param in model.cnn1.parameters():
         param.requires_grad = False
-    for param in model.cnn.cnn2.parameters():
+    for param in model.cnn2.parameters():
         param.requires_grad = False
-    # fc1 and fc2 remain trainable
-    print("[+] Backbone frozen. Only fc1 and fc2 are trainable.")
+    # fc trainable
+    print("[+] Backbone frozen. Only fc stays trainable.")
 
 def train(
     model,
@@ -431,7 +431,7 @@ if __name__ == "__main__":
         raise ImportError("Install pytorch-metric-learning for SupConLoss: pip install -e '.[torch]'")
     loss_func = SupConLoss(temperature=0.07)
     optimizer = torch.optim.Adam(
-        list(model.parameters()) + list(embedding_model.parameters()),
+        model.parameters(),
         lr=args.learning_rate,
         weight_decay=args.decay
     )
@@ -442,7 +442,7 @@ if __name__ == "__main__":
         model=model,
         embedding_model=embedding_model,
         weights=args.weights,
-        epochs=100,
+        epochs=30,
         device=device,
         data=[data_train, data_val],
         species_val=species_val,
@@ -461,8 +461,7 @@ if __name__ == "__main__":
     freeze_backbone(model)
 
     optimizer_ft = torch.optim.Adam(
-        filter(lambda p: p.requires_grad,
-               list(model.parameters()) + list(embedding_model.parameters())),
+        filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.learning_rate / 10,
         weight_decay=args.decay
     )

@@ -91,7 +91,6 @@ class PatchPairDataset(Dataset):
             'negative_patches': negative_patches
         }
 
-# test class added by assaf
 class MicrogliaDataset(Dataset):
     """Supervised dataset for microglia classification."""
     
@@ -204,7 +203,13 @@ def split_indices_by_image(dataset, val_split=0.2, seed=42):
         for i, image in enumerate(images):
             (val_indices if i < n_val else train_indices).extend(images_by_folder[folder][image])
 
-    return sorted(train_indices), sorted(val_indices)
+    # Files are listed folder by folder, so in file order a validation batch would
+    # hold a single class, and batch-level metrics (SupConLoss returns 0 for a
+    # batch with no negatives) would be meaningless. Fixed shuffle: mixed batches,
+    # same order every epoch and every run.
+    val_indices = sorted(val_indices)
+    np.random.default_rng(seed).shuffle(val_indices)
+    return sorted(train_indices), val_indices
 
 
 class TransformedSubset(Dataset):

@@ -2,6 +2,7 @@
 #SBATCH --job-name=my_job
 #SBATCH --account=stf
 #SBATCH --partition=ckpt
+#SBATCH --cpus-per-task=4
 #SBATCH --gpus-per-node=2080ti:1
 #SBATCH --mem=20G
 #SBATCH --time=12:00:00
