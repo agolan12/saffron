@@ -21,6 +21,66 @@ from torchvision.transforms import v2
 import torch.nn as nn
 import torch.nn.functional as F
 
+# fc1[0] is Linear(flattened_size, 500) and holds almost all of the weights. Above this
+# many inputs it (plus its gradient and Adam state) no longer fits on an 11 GB GPU.
+MAX_FLATTENED_SIZE = 600_000
+
+
+class ConfigurableMicrogliaCNN(MicrogliaCNN):
+    """
+    MicrogliaCNN with its convolution and pooling settings exposed, for architecture sweeps.
+
+    The defaults rebuild MicrogliaCNN exactly: 12x12 convolutions with stride 2, average
+    pooling after the first convolution and max pooling after the second ("mixed").
+
+    kernel_size, stride: used by both convolutions (padding stays 2, as in MicrogliaCNN)
+    pool: "mixed" (avg then max), "avg" (both average) or "max" (both max)
+    pool_size: pooling window, used by both pooling layers (pooling stride stays 2)
+    """
+
+    def __init__(self, kernel_size=12, stride=2, pool="mixed", pool_size=12, input_size=512, num_classes=6):
+        nn.Module.__init__(self)  # the layers are built here instead of in MicrogliaCNN.__init__
+
+        pool_padding = min(2, pool_size // 2)  # PyTorch requires pooling padding <= half the window
+
+        def pool_layer(kind):
+            layer = nn.AvgPool2d if kind == "avg" else nn.MaxPool2d
+            return layer(kernel_size=pool_size, stride=2, padding=pool_padding)
+
+        first_pool, second_pool = ("avg", "max") if pool == "mixed" else (pool, pool)
+
+        self.cnn1 = nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=8, kernel_size=kernel_size, stride=stride, padding=2),
+            nn.ReLU(),
+            pool_layer(first_pool),
+        )
+        self.cnn2 = nn.Sequential(
+            nn.Conv2d(in_channels=8, out_channels=128, kernel_size=kernel_size, stride=stride, padding=2),
+            nn.ReLU(),
+            pool_layer(second_pool),
+        )
+
+        try:
+            self.flattened_size = self._get_flattened_size(input_size)
+        except RuntimeError as error:
+            raise SystemExit(
+                f"kernel_size={kernel_size}, stride={stride}, pool_size={pool_size} shrink a "
+                f"{input_size}x{input_size} image to nothing ({error}). Use a smaller kernel, stride or pool size."
+            )
+        if self.flattened_size > MAX_FLATTENED_SIZE:
+            raise SystemExit(
+                f"kernel_size={kernel_size}, stride={stride}, pool_size={pool_size} leave {self.flattened_size:,} "
+                f"features after the convolutions (limit {MAX_FLATTENED_SIZE:,}); the next layer would not fit "
+                f"in GPU memory. Use a larger stride or pool size."
+            )
+
+        self.fc1 = nn.Sequential(
+            nn.Linear(self.flattened_size, 500),
+            nn.ReLU(),
+            nn.Linear(500, num_classes),
+        )
+
+
 class MicrogliaEmbeddingWrapper(nn.Module):
     """Wraps MicrogliaCNN to return L2-normalized 500-d embeddings for SupConLoss (penultimate layer)."""
     def __init__(self, cnn):
@@ -399,6 +459,34 @@ if __name__ == "__main__":
 					type=str, 
 					help="Path to store or load the model weights file, if any.")
     parser.add_argument('-v', '--verbose', action='store_true')
+    # training recipe
+    parser.add_argument("--stage1_epochs",
+					default=30,
+					type=int,
+					help="Number of epochs for stage 1 (--epochs sets stage 2).")
+    parser.add_argument("--ce_weight",
+					default=0.3,
+					type=float,
+					help="Stage 1 loss = (1 - ce_weight) * SupCon + ce_weight * cross-entropy. "
+					     "0 trains stage 1 on SupCon only; accuracy is then meaningless until stage 2.")
+    # architecture (defaults are the original MicrogliaCNN)
+    parser.add_argument("--kernel_size",
+					default=12,
+					type=int,
+					help="Kernel size of both convolutions.")
+    parser.add_argument("--stride",
+					default=2,
+					type=int,
+					help="Stride of both convolutions.")
+    parser.add_argument("--pool",
+					default="mixed",
+					choices=["mixed", "avg", "max"],
+					help="Pooling after the convolutions: mixed = average then max (the original), "
+					     "avg = both average, max = both max.")
+    parser.add_argument("--pool_size",
+					default=12,
+					type=int,
+					help="Window size of both pooling layers.")
 
     args = parser.parse_args()
 
@@ -424,8 +512,16 @@ if __name__ == "__main__":
     logger.info(f"Using device: {device}")
 	
 
+    model = ConfigurableMicrogliaCNN(
+        kernel_size=args.kernel_size,
+        stride=args.stride,
+        pool=args.pool,
+        pool_size=args.pool_size,
+    )
+    print(f"[+] Model: {model.flattened_size:,} features after the convolutions, "
+          f"{sum(p.numel() for p in model.parameters()):,} weights")
+
     data_train, data_val, species_val = make_dataloaders(batch_size=args.batch_size)
-    model = MicrogliaCNN()
     embedding_model = MicrogliaEmbeddingWrapper(model)  # 500-d normalized embeddings for SupConLoss
     if SupConLoss is None:
         raise ImportError("Install pytorch-metric-learning for SupConLoss: pip install -e '.[torch]'")
@@ -437,18 +533,18 @@ if __name__ == "__main__":
     )
 
     # --- Stage 1: SupCon + CE, all layers trainable ---
-    print("[+] Stage 1: Supervised contrastive learning")
+    print(f"[+] Stage 1: Supervised contrastive learning ({args.stage1_epochs} epochs, ce_weight={args.ce_weight})")
     val_accuracy, val_loss, train_loss = train(
         model=model,
         embedding_model=embedding_model,
         weights=args.weights,
-        epochs=30,
+        epochs=args.stage1_epochs,
         device=device,
         data=[data_train, data_val],
         species_val=species_val,
         loss_func=loss_func,
         optimizer=optimizer,
-        ce_weight=0.3,
+        ce_weight=args.ce_weight,
         stage=1,
         job_id=job_id,
         task_id=task_id,
