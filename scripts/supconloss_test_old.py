@@ -447,7 +447,7 @@ if __name__ == "__main__":
 					type=int, 
 					help="Batch size for training.")
     parser.add_argument("-l", "--learning_rate",
-					default=0.003, 
+					default=0.0003, 
 					type=float, 
 					help="Learning rate for the optimizer.")
     parser.add_argument("--decay",
