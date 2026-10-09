@@ -1,8 +1,13 @@
+import zlib
+from collections import defaultdict
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from typing import List, Tuple
 from pathlib import Path
+
+from .data_processing import extract_base_name
 
 def get_random_patch_position(image_shape: Tuple[int, int], patch_size: int) -> Tuple[int, int]:
     """
@@ -90,37 +95,46 @@ class PatchPairDataset(Dataset):
 class MicrogliaDataset(Dataset):
     """Supervised dataset for microglia classification."""
     
-    def __init__(self, data_dir, train=True, labels=['HC', 'OGD', 'ROT'], 
-    transform=None, merge_map=None):
+    def __init__(
+        self,
+        data_dir,
+        labels=['HC', 'OGD', 'ROT'],
+        transform=None,
+        merge_map=None,
+    ):
         """
         Args:
             data_dir: Path to directory containing subdirectories for each label
             train: Not used, kept for compatibility
-            labels: List of class labels (should match subdirectory names)
+            labels: Logical class names in output label order (indices 0..C-1)
             transform: Optional transforms to apply
-            merge_map: Option map to merge labeled groups
+            merge_map: Optional dict mapping subdirectory name -> logical label name.
+                Files under that subdirectory use the target label's index. Example:
+                ``{'human': 'gyrified', 'ferret': 'gyrified'}`` loads ``human/*`` as class
+                ``gyrified`` if ``'gyrified'`` is in ``labels``.
         """
         self.data_dir = Path(data_dir)
-        self.labels = labels
-        self.label_to_idx = {label: idx for idx, label in enumerate(labels)}
+        self.labels = list(labels)
+        self.label_to_idx = {label: idx for idx, label in enumerate(self.labels)}
         self.transform = transform
         self.merge_map = merge_map or {}
         self.samples = []
-        
-        # Load files from each label subdirectory
-        dirs_to_scan = []
-        for label in labels:
-            dirs_to_scan.append((label, label))  # (dir_name, label_name)
-        for dir_name, label_name in self.merge_map.items():
-            dirs_to_scan.append((dir_name, label_name))
 
-        for dir_name, label_name in dirs_to_scan:
-            label_dir = self.data_dir / dir_name
+        # Subdirectories to scan: explicit label folders plus any merge_map sources
+        subdirs_to_scan = set(self.labels)
+        subdirs_to_scan.update(self.merge_map.keys())
+
+        for subdir_name in sorted(subdirs_to_scan):
+            label_dir = self.data_dir / subdir_name
             if not label_dir.exists():
-                print(f"Warning: Directory {label_dir} does not exist, skipping...")
                 continue
+            logical_label = self.merge_map.get(subdir_name, subdir_name)
+            if logical_label not in self.label_to_idx:
+                print(f"Warning: Mapped label {logical_label!r} not in labels, skipping {label_dir}")
+                continue
+            label_idx = self.label_to_idx[logical_label]
             for filepath in label_dir.rglob("*.npy"):
-                self.samples.append((str(filepath), self.label_to_idx[label_name]))
+                self.samples.append((str(filepath), label_idx))
         
         self.length = len(self.samples)
         print(f"Loaded {self.length} images from {data_dir}")
@@ -153,34 +167,98 @@ class MicrogliaDataset(Dataset):
         return image, label
 
 
-def generate_dataloaders(dataset, num_workers=2, batch_size=32, val_split=0.2):
+def split_indices_by_image(dataset, val_split=0.2, seed=42):
     """
-    Split dataset into train/val and create DataLoaders.
+    Split sample indices into train/val so that every quadrant of an image
+    lands on the same side.
+
+    Files are grouped by original image (filename without the _TL/_TR/_BL/_BR
+    suffix). Each top-level folder under ``dataset.data_dir`` is split
+    separately, so every folder contributes about ``val_split`` of its images
+    to validation.
+
+    The split depends only on folder names, filenames and ``seed`` -- not on
+    the dataset's labels or merge_map -- so two MicrogliaDatasets built over
+    the same files get the same validation images.
+
+    Returns:
+        train_indices, val_indices
+    """
+    # folder -> image -> indices of that image's quadrants
+    images_by_folder = defaultdict(lambda: defaultdict(list))
+    for idx, (filepath, _) in enumerate(dataset.samples):
+        path = Path(filepath)
+        folder = path.relative_to(dataset.data_dir).parts[0]
+        image = str(path.parent / extract_base_name(filepath))
+        images_by_folder[folder][image].append(idx)
+
+    train_indices, val_indices = [], []
+    for folder in sorted(images_by_folder):
+        images = sorted(images_by_folder[folder])
+        # Seeded per folder, so a folder's split doesn't depend on which other folders are loaded
+        rng = np.random.default_rng([seed, zlib.crc32(folder.encode())])
+        rng.shuffle(images)
+        n_val = round(len(images) * val_split)
+        if len(images) > 1:
+            n_val = min(max(n_val, 1), len(images) - 1)  # at least one image on each side
+        for i, image in enumerate(images):
+            (val_indices if i < n_val else train_indices).extend(images_by_folder[folder][image])
+
+    return sorted(train_indices), sorted(val_indices)
+
+
+class TransformedSubset(Dataset):
+    """
+    The samples of ``dataset`` at ``indices``, with an extra transform applied
+    to each image. Lets the train and val halves of one dataset use different
+    transforms (augmentation for train, none for val).
+    """
+
+    def __init__(self, dataset, indices, transform=None):
+        self.dataset = dataset
+        self.indices = indices
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        image, label = self.dataset[self.indices[idx]]
+        if self.transform:
+            image = self.transform(image)
+        return image, label
+
+
+def generate_dataloaders(dataset, num_workers=2, batch_size=32, val_split=0.2,
+                         train_transform=None, val_transform=None):
+    """
+    Split dataset into train/val by image and create DataLoaders.
     
     Args:
         dataset: MicrogliaDataset instance
         num_workers: Number of worker processes
         batch_size: Batch size
-        val_split: Fraction of data for validation
+        val_split: Fraction of images (per folder) for validation
+        train_transform: Transforms for training images only (put random
+            augmentation here)
+        val_transform: Transforms for validation images only (resize/normalize,
+            nothing random)
+
+        Both are applied after the dataset's own ``transform``, which runs on
+        every image. Leave that one as None when using these, otherwise its
+        augmentation reaches the validation images too.
     
     Returns:
         train_loader, val_loader
     """
-    from torch.utils.data import random_split, WeightedRandomSampler
+    from torch.utils.data import WeightedRandomSampler
     
-    # Calculate split sizes
-    total_size = len(dataset)
-    val_size = int(total_size * val_split)
-    train_size = total_size - val_size
+    # Split by image, not by file: quadrants of one image must not straddle train/val
+    train_indices, val_indices = split_indices_by_image(dataset, val_split=val_split, seed=42)
+    train_dataset = TransformedSubset(dataset, train_indices, train_transform)
+    val_dataset = TransformedSubset(dataset, val_indices, val_transform)
     
-    # Split dataset
-    train_dataset, val_dataset = random_split(
-        dataset, 
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)  # For reproducibility
-    )
-    
-    print(f"Train size: {train_size}, Val size: {val_size}")
+    print(f"Train size: {len(train_indices)}, Val size: {len(val_indices)}")
     
     # Get class counts for training set
     train_labels = [dataset.samples[i][1] for i in train_dataset.indices]

@@ -70,7 +70,8 @@ def device_check(req_dev):
 
 def make_dataloaders(batch_size=32):
 
-    transforms = v2.Compose([
+    # Training: random augmentation
+    train_transforms = v2.Compose([
         v2.Resize(size=(512, 512)),
         v2.RandomHorizontalFlip(p=0.5),
         v2.RandomVerticalFlip(p=0.5),
@@ -79,6 +80,14 @@ def make_dataloaders(batch_size=32):
         v2.ColorJitter(brightness=0.2, contrast=0.2),
         v2.ToDtype(torch.float32, scale=True),
         v2.Normalize(mean=[0.5], std=[0.5]),  # 1-channel grayscale
+        ])
+
+    # Validation: same preprocessing, nothing random, so metrics and UMAPs are repeatable
+    val_transforms = v2.Compose([
+        v2.Resize(size=(512, 512)),
+        v2.Grayscale(num_output_channels=1),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean=[0.5], std=[0.5]),
         ])
     
     images_path = Path("/gscratch/cheme/agolan/data/preprocessed_data")
@@ -107,24 +116,27 @@ def make_dataloaders(batch_size=32):
 
     microglia_dataset = MicrogliaDataset(
         images_path,
-        train=True,
         labels=["mice", "rat", "gyrified"],
-        transform=transforms,
         merge_map={"human": "gyrified", "ferret": "gyrified", "pig": "gyrified"},
     )
 
     # Dataset with all 5 species — used only for the species UMAP
     species_dataset = MicrogliaDataset(
         images_path,
-        train=True,
         labels=["mice", "rat", "human", "ferret", "pig"],
-        transform=transforms,
     )
 
     print(microglia_dataset.length)
 
-    data_train, data_val = generate_dataloaders(microglia_dataset, num_workers=2, batch_size=batch_size)
-    _, species_val = generate_dataloaders(species_dataset, num_workers=2, batch_size=batch_size)
+    # Transforms are applied after the split, so only the training half is augmented
+    data_train, data_val = generate_dataloaders(
+        microglia_dataset, num_workers=2, batch_size=batch_size,
+        train_transform=train_transforms, val_transform=val_transforms,
+    )
+    _, species_val = generate_dataloaders(
+        species_dataset, num_workers=2, batch_size=batch_size,
+        train_transform=train_transforms, val_transform=val_transforms,
+    )
 
     return data_train, data_val, species_val
 
