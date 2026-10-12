@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix
 
 # Add src to path so we can import saffron (script lives in scripts/, package in src/)
@@ -66,16 +66,13 @@ def main():
     dataset = MicrogliaDataset(args.data_dir, labels=LABELS, merge_map=MERGE_MAP)
     train_indices, val_indices = split_indices_by_image(dataset, val_split=0.2, seed=42)
 
-    print(f"reading {len(dataset.samples)} images ...")
+    print(f"reading {len(dataset.samples)} images ...", flush=True)
     features = np.stack([brightness_numbers(path) for path, _ in dataset.samples])
     labels = np.array([label for _, label in dataset.samples])
     folders = np.array([Path(path).relative_to(dataset.data_dir).parts[0] for path, _ in dataset.samples])
 
     x_train, y_train = features[train_indices], labels[train_indices]
     x_val, y_val = features[val_indices], labels[val_indices]
-    # Each class counts equally in training, like the balanced sampler in the training script
-    class_counts = np.bincount(y_train, minlength=len(LABELS))
-    weights = (1.0 / class_counts)[y_train]
 
     out("=" * 70)
     out("SHORTCUT TEST: classifying from brightness alone (no cell shape)")
@@ -93,8 +90,13 @@ def main():
         + "  ".join(LABELS))
     predictions = {}
     for name, columns in versions:
-        model = HistGradientBoostingClassifier(max_iter=200, learning_rate=0.1, random_state=0)
-        model.fit(x_train[:, columns], y_train, sample_weight=weights)
+        print(f"training '{name}' ...", flush=True)
+        # class_weight="balanced": each class counts equally, like the balanced sampler in the
+        # training script. n_jobs=1 and a random forest (no OpenMP) on purpose: the gradient-boosting
+        # classifier used here before hung on Hyak, where PyTorch is loaded in the same process.
+        model = RandomForestClassifier(n_estimators=300, min_samples_leaf=5, class_weight="balanced",
+                                       n_jobs=1, random_state=0)
+        model.fit(x_train[:, columns], y_train)
         predicted = model.predict(x_val[:, columns])
         predictions[name] = predicted
         recall = [np.mean(predicted[y_val == c] == c) for c in range(len(LABELS))]
