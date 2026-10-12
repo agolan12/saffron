@@ -12,6 +12,7 @@ import umap
 # Add src to path so we can import saffron (script lives in scripts/, package in src/)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from image_prep import li_mask, LI_BACKGROUND_SIGMA, LI_MIN_SIZE, LI_MAX_HOLE
 from saffron.io import data_io
 from saffron.data.datasets import MicrogliaDataset, generate_dataloaders
 from saffron.data import data_processing
@@ -24,6 +25,14 @@ import torch.nn.functional as F
 # fc1[0] is Linear(flattened_size, 500) and holds almost all of the weights. Above this
 # many inputs it (plus its gradient and Adam state) no longer fits on an 11 GB GPU.
 MAX_FLATTENED_SIZE = 600_000
+
+DEFAULT_DATA_DIR = "/gscratch/cheme/agolan/data/preprocessed_data"
+
+# What --classes can be: name -> (class names in label order, folders merged into a class)
+CLASS_SETS = {
+    "all": (["mice", "rat", "gyrified"], {"human": "gyrified", "ferret": "gyrified", "pig": "gyrified"}),
+    "rodent": (["mice", "rat"], {}),
+}
 
 
 class ConfigurableMicrogliaCNN(MicrogliaCNN):
@@ -134,6 +143,28 @@ class EqualizeHistogram(nn.Module):
         return (rank ** self.power).reshape(image.shape).to(image.dtype)
 
 
+class LiThreshold(nn.Module):
+    """
+    Turns one image into a black-and-white cell mask: 1 = cell, 0 = background.
+    The steps (background removal, Li's threshold, clean-up) are in image_prep.li_mask.
+
+    What it removes: all brightness levels, the background, and texture inside cells.
+    What it keeps: the outlines of whatever passed the cutoff, and how much of the image
+    that is.
+    """
+    def __init__(self, background_sigma=LI_BACKGROUND_SIGMA, min_size=LI_MIN_SIZE, max_hole=LI_MAX_HOLE):
+        super().__init__()
+        self.background_sigma = background_sigma
+        self.min_size = min_size
+        self.max_hole = max_hole
+
+    def forward(self, image):
+        height, width = image.shape[-2:]
+        mask = li_mask(image.detach().cpu().numpy().reshape(height, width),
+                       self.background_sigma, self.min_size, self.max_hole)
+        return torch.from_numpy(mask).reshape(image.shape).to(image.dtype)
+
+
 class MicrogliaEmbeddingWrapper(nn.Module):
     """Wraps MicrogliaCNN to return L2-normalized 500-d embeddings for SupConLoss (penultimate layer)."""
     def __init__(self, cnn):
@@ -181,11 +212,17 @@ def device_check(req_dev):
 	return device
 
 
-def make_dataloaders(batch_size=32, equalize=False):
+def make_dataloaders(batch_size=32, equalize=False, li_threshold=False, classes="all",
+                     data_dir=DEFAULT_DATA_DIR, li_settings=None):
 
     # Optional first step for both training and validation, applied to the image as stored
     # (before resizing and augmentation), so the brightness shortcut is removed at the source.
-    first_steps = [EqualizeHistogram()] if equalize else []
+    first_steps = []
+    if equalize:
+        first_steps.append(EqualizeHistogram())
+    if li_threshold:
+        first_steps.append(LiThreshold(**(li_settings or {})))
+    labels, merge_map = CLASS_SETS[classes]
 
     # Training: random augmentation
     train_transforms = v2.Compose(first_steps + [
@@ -207,7 +244,7 @@ def make_dataloaders(batch_size=32, equalize=False):
         v2.Normalize(mean=[0.5], std=[0.5]),
         ])
     
-    images_path = Path("/gscratch/cheme/agolan/data/preprocessed_data")
+    images_path = Path(data_dir)
     # images = data_io.load_images_from_directory(images_path)
     
     # DEBUG: Check directory structure
@@ -231,17 +268,12 @@ def make_dataloaders(batch_size=32, equalize=False):
                 print(f"  Example files: {[f.name for f in npy_files[:3]]}")
     print(f"{'='*60}\n")
 
-    microglia_dataset = MicrogliaDataset(
-        images_path,
-        labels=["mice", "rat", "gyrified"],
-        merge_map={"human": "gyrified", "ferret": "gyrified", "pig": "gyrified"},
-    )
+    microglia_dataset = MicrogliaDataset(images_path, labels=labels, merge_map=merge_map)
 
-    # Dataset with all 5 species — used only for the species UMAP
-    species_dataset = MicrogliaDataset(
-        images_path,
-        labels=["mice", "rat", "human", "ferret", "pig"],
-    )
+    # Dataset with every species folder that is in use as its own class — used only for the species UMAP
+    species_labels = [name for name in ["mice", "rat", "human", "ferret", "pig"]
+                      if name in labels or name in merge_map]
+    species_dataset = MicrogliaDataset(images_path, labels=species_labels)
 
     print(microglia_dataset.length)
 
@@ -293,6 +325,8 @@ def visualize_embeddings(
         plt.figure(figsize=(7, 6))
         for cls_idx, cls_name in label_names.items():
             mask = labels_arr == cls_idx
+            if not mask.any():
+                continue                               # class not part of this run (--classes)
             plt.scatter(
                 reduced[mask, 0],
                 reduced[mask, 1],
@@ -542,6 +576,31 @@ if __name__ == "__main__":
 					type=float,
 					help="Stage 1 loss = (1 - ce_weight) * SupCon + ce_weight * cross-entropy. "
 					     "0 trains stage 1 on SupCon only; accuracy is then meaningless until stage 2.")
+    parser.add_argument("--classes",
+					default="all",
+					choices=sorted(CLASS_SETS),
+					help="all = mice, rat, gyrified (human + ferret + pig); rodent = mice and rat only.")
+    parser.add_argument("--li_threshold",
+					action="store_true",
+					help="Turn every image into a black-and-white cell mask first: background removal, "
+					     "Li's threshold, clean-up (see image_prep.li_mask). Cannot be combined with --equalize.")
+    parser.add_argument("--li_background_sigma",
+					default=LI_BACKGROUND_SIGMA,
+					type=float,
+					help="With --li_threshold: width in pixels of the blur used to remove background "
+					     "before thresholding. 0 = no background removal.")
+    parser.add_argument("--li_min_size",
+					default=LI_MIN_SIZE,
+					type=int,
+					help="With --li_threshold: white specks smaller than this many pixels are removed.")
+    parser.add_argument("--li_max_hole",
+					default=LI_MAX_HOLE,
+					type=int,
+					help="With --li_threshold: black holes smaller than this many pixels are filled.")
+    parser.add_argument("--data_dir",
+					default=DEFAULT_DATA_DIR,
+					type=str,
+					help="Folder that holds the species folders.")
     parser.add_argument("--equalize",
 					action="store_true",
 					help="Give every image the same brightness distribution first (see EqualizeHistogram), "
@@ -578,6 +637,8 @@ if __name__ == "__main__":
 					help="Window size of both pooling layers.")
 
     args = parser.parse_args()
+    if args.equalize and args.li_threshold:
+        parser.error("--equalize and --li_threshold cannot be combined: a mask has no brightness left to equalise")
 
     # Print all parameters to stdout (shows up in .out file)
     print("=" * 60)
@@ -606,12 +667,17 @@ if __name__ == "__main__":
         stride=args.stride,
         pool=args.pool,
         pool_size=args.pool_size,
-        num_classes=3,  # mice, rat, gyrified (see make_dataloaders)
+        num_classes=len(CLASS_SETS[args.classes][0]),
     )
     print(f"[+] Model: {model.flattened_size:,} features after the convolutions, "
           f"{sum(p.numel() for p in model.parameters()):,} weights")
 
-    data_train, data_val, species_val = make_dataloaders(batch_size=args.batch_size, equalize=args.equalize)
+    data_train, data_val, species_val = make_dataloaders(
+        batch_size=args.batch_size, equalize=args.equalize, li_threshold=args.li_threshold,
+        classes=args.classes, data_dir=args.data_dir,
+        li_settings={"background_sigma": args.li_background_sigma, "min_size": args.li_min_size,
+                     "max_hole": args.li_max_hole},
+    )
     embedding_model = MicrogliaEmbeddingWrapper(model)  # 500-d normalized embeddings for SupConLoss
     if SupConLoss is None:
         raise ImportError("Install pytorch-metric-learning for SupConLoss: pip install -e '.[torch]'")

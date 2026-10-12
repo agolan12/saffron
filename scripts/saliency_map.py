@@ -35,11 +35,10 @@ from torchvision.transforms import v2
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from saffron.data.datasets import MicrogliaDataset, split_indices_by_image
-from supconloss_test_old import ConfigurableMicrogliaCNN, EqualizeHistogram, device_check
+from supconloss_test_old import (CLASS_SETS, DEFAULT_DATA_DIR, ConfigurableMicrogliaCNN, EqualizeHistogram,
+                                 LiThreshold, device_check)
+from image_prep import LI_BACKGROUND_SIGMA, LI_MIN_SIZE, LI_MAX_HOLE
 
-DEFAULT_DATA_DIR = "/gscratch/cheme/agolan/data/preprocessed_data"
-LABELS = ["mice", "rat", "gyrified"]
-MERGE_MAP = {"human": "gyrified", "ferret": "gyrified", "pig": "gyrified"}
 CELL_SHARE = 0.15   # the brightest 15% of pixels are treated as "cell"
 
 
@@ -80,6 +79,12 @@ def main():
     parser.add_argument("--weights", required=True, help="model weights (.pt) saved by supconloss_test_old.py")
     parser.add_argument("--data_dir", default=DEFAULT_DATA_DIR, help="folder that holds the species folders")
     parser.add_argument("--equalize", action="store_true", help="use if the run was trained with --equalize")
+    parser.add_argument("--li_threshold", action="store_true", help="use if the run was trained with --li_threshold")
+    parser.add_argument("--li_background_sigma", default=LI_BACKGROUND_SIGMA, type=float)
+    parser.add_argument("--li_min_size", default=LI_MIN_SIZE, type=int)
+    parser.add_argument("--li_max_hole", default=LI_MAX_HOLE, type=int)
+    parser.add_argument("--classes", default="all", choices=sorted(CLASS_SETS),
+                        help="the --classes value the run was trained with")
     parser.add_argument("--per_class", default=4, type=int, help="validation images to show per class")
     parser.add_argument("--seed", default=0, type=int, help="which random validation images are picked")
     parser.add_argument("--dev", default=None, choices=["cpu", "cuda", "mps"], help="device, default automatic")
@@ -91,6 +96,7 @@ def main():
     parser.add_argument("--pool_size", default=12, type=int)
     args = parser.parse_args()
     output = args.output or f"saliency_{Path(args.weights).stem}.png"
+    LABELS, MERGE_MAP = CLASS_SETS[args.classes]
 
     torch.manual_seed(args.seed)
     torch.set_num_threads(4)
@@ -103,6 +109,8 @@ def main():
 
     # Same preprocessing as validation in the training script
     steps = [EqualizeHistogram()] if args.equalize else []
+    if args.li_threshold:
+        steps.append(LiThreshold(args.li_background_sigma, args.li_min_size, args.li_max_hole))
     transform = v2.Compose(steps + [
         v2.Resize(size=(512, 512)),
         v2.Grayscale(num_output_channels=1),
@@ -132,9 +140,11 @@ def main():
         occlusion = occlusion_map(model, image, predicted).cpu().numpy()
         shown = (image.squeeze(0).cpu().numpy() * 0.5 + 0.5).clip(0, 1)   # undo Normalize for display
 
-        cells = shown >= np.quantile(shown, 1 - CELL_SHARE)
+        # "cell" pixels: the white part of a Li mask, otherwise the brightest 15% of the image
+        cells = shown > 0.5 if args.li_threshold else shown >= np.quantile(shown, 1 - CELL_SHARE)
+        chance = cells.mean()                          # the share expected if the model ignored cells
         on_cells = gradients[cells].sum() / gradients.sum()
-        shares[LABELS[label]].append(on_cells)
+        shares[LABELS[label]].append((on_cells, chance))
         path = Path(dataset.samples[int(index)][0])
         species = path.relative_to(dataset.data_dir).parts[0]
         print(f"{LABELS[label]:<10}{LABELS[predicted]:<11}{probabilities[predicted].item():>11.2f}{on_cells:>19.2f}"
@@ -145,7 +155,7 @@ def main():
                          f"({probabilities[predicted].item():.2f})", fontsize=8, loc="left")
         row[1].imshow(shown, cmap="gray", vmin=0, vmax=1)
         row[1].imshow(gradients, cmap="magma", alpha=0.75, vmax=np.quantile(gradients, 0.995))
-        row[1].set_title(f"gradient map: {on_cells:.0%} on cell pixels (chance {CELL_SHARE:.0%})", fontsize=8, loc="left")
+        row[1].set_title(f"gradient map: {on_cells:.0%} on cell pixels (chance {chance:.0%})", fontsize=8, loc="left")
         limit = max(abs(occlusion).max(), 0.05)   # drops under 0.05 stay pale, so noise does not look like signal
         row[2].imshow(shown, cmap="gray", vmin=0, vmax=1)
         row[2].imshow(occlusion, cmap="coolwarm", alpha=0.6, vmin=-limit, vmax=limit)
@@ -157,11 +167,13 @@ def main():
     fig.tight_layout()
     fig.savefig(output, dpi=110)
     print(f"\nwrote {output}")
-    print(f"\nShare of the gradient map on cell pixels (the brightest {CELL_SHARE:.0%}); "
-          f"{CELL_SHARE:.2f} would mean no preference for cells:")
+    print("\nShare of the gradient map on cell pixels, next to the share of the image those pixels cover.\n"
+          "Equal numbers mean no preference for cells; a higher first number means the model looks at cells.")
     for label, values in shares.items():
         if values:
-            print(f"  {label:<10} mean {np.mean(values):.2f}   (range {min(values):.2f} to {max(values):.2f})")
+            on, expected = np.array(values).T
+            print(f"  {label:<10} on cells {on.mean():.2f} (range {on.min():.2f} to {on.max():.2f})"
+                  f"   cells cover {expected.mean():.2f} of the image")
 
 
 if __name__ == "__main__":

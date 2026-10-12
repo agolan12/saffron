@@ -28,6 +28,7 @@ import numpy as np
 # Fixed colour per run, in order. Up to 8 runs; more than that is unreadable anyway.
 COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
 MAJORITY_BASELINE = 0.41  # accuracy of always guessing mice (2,916 of 7,076 files)
+MAJORITY_BASELINE_RODENT = 0.53  # the same with mice and rat only (2,916 of 5,544 files)
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # One regex for both bars, so matches come back in the order they were printed.
@@ -96,8 +97,12 @@ def run_label(err_path):
                 if match:
                     parts.append(f"{short} {float(match.group(1)):g}")
             # options that only appear in the label when they differ from the original recipe
+            if re.search(r"classes\s*=\s*rodent", text):
+                parts.append("mice vs rat")
             if re.search(r"equalize\s*=\s*True", text):
                 parts.append("equalized")
+            if re.search(r"li_threshold\s*=\s*True", text):
+                parts.append("Li mask")
             if re.search(r"stage2_head_only\s*=\s*True", text):
                 parts.append("head only")
             match = re.search(r"lr_drop_epoch\s*=\s*(\d+)", text)
@@ -156,9 +161,12 @@ def main():
         ax.spines[["top", "right"]].set_visible(False)
         ax.margins(x=0.03)
 
-    axes[2].axhline(MAJORITY_BASELINE, color="#8a8983", lw=1, ls=":")
-    axes[2].annotate(f"always guess mice ({MAJORITY_BASELINE})", (1, MAJORITY_BASELINE), xycoords=("axes fraction", "data"),
-                     xytext=(-4, -11), textcoords="offset points", ha="right", fontsize=8, color="#52514e")
+    # a line for each class set that appears among the runs
+    baselines = sorted({MAJORITY_BASELINE_RODENT if "mice vs rat" in run["label"] else MAJORITY_BASELINE for run in runs})
+    for baseline in baselines:
+        axes[2].axhline(baseline, color="#8a8983", lw=1, ls=":")
+        axes[2].annotate(f"always guess mice ({baseline})", (1, baseline), xycoords=("axes fraction", "data"),
+                         xytext=(-4, -11), textcoords="offset points", ha="right", fontsize=8, color="#52514e")
     axes[2].set_ylim(0, 1)
     # the bottom of the accuracy panel is the one area the lines rarely reach
     axes[2].legend(loc="lower right", frameon=False, fontsize=9, title="run")
