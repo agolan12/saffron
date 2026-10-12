@@ -39,8 +39,40 @@ SEXES = {"male", "female"}
 # Only these two species have "treatment" right after the species word in the examples seen so far.
 TREATMENT_AFTER_SPECIES = {"mouse", "rat"}
 
+# Brain-region codes seen in the names, each optionally followed by a number (cc1, thal2, ...).
+# Spelling variants are mapped onto one code.
+REGION = re.compile(r"(wmcor|wm|hipca|hipdg|cblm|cbl|cb|thal|cortex|cor|cc|st|pl)\d*")
+REGION_ALIASES = {"cortex": "cor", "cbl": "cblm", "cb": "cblm"}
+
 COLUMNS = ["folder", "subfolder", "file", "species", "treatment", "age", "sex", "animal",
-           "animal_by_package", "date", "slide", "slice", "magnification", "quadrant", "other"]
+           "animal_by_package", "date", "slide", "slice", "magnification", "region", "stain",
+           "quadrant", "other"]
+
+
+def find_animal(row, tokens):
+    """
+    The animal a file comes from, or "" if the name does not say.
+
+    Mouse and rat IDs include the age: the same ID (rat m1) is used for one animal at p13
+    and a different one at p70. Pig names carry a sample letter after the animal
+    (2187_B, 2187_D); both letters are the same animal, so the letter is left out.
+    """
+    lows = [t.lower() for t in tokens]
+    species = row["species"]
+    if species == "mouse":
+        ids = [t for t in lows if re.fullmatch(r"(fs|ms)\d+", t)]
+        return f"mouse_{row['age']}_{ids[0]}" if ids else ""
+    if species == "rat":
+        ids = [t for t in lows if re.fullmatch(r"[mf]\d+", t)]
+        return f"rat_{row['age']}_{ids[0]}" if ids else ""
+    if species in ("pig", "ferret") and species in lows[:-1]:
+        return f"{species}_{tokens[lows.index(species) + 1]}"
+    if species == "rabbit":
+        match = re.search(r"rabbit_?(\d+C\d+)", "_".join(tokens))
+        return f"rabbit_{match.group(1)}" if match else ""
+    if species == "human":
+        return tokens[0]                               # donor, e.g. UWA-7606 (the next piece is the tissue block)
+    return ""
 
 
 def parse_name(path, data_dir):
@@ -55,6 +87,11 @@ def parse_name(path, data_dir):
     if tokens[-1] in QUADRANTS:
         row["quadrant"] = tokens.pop()
 
+    # Stain is written as "Alexa_488_antibody" or "Alx568"
+    stain = re.search(r"(?:Alexa_|Alx)(\d+)", path.stem)
+    if stain:
+        row["stain"] = f"Alexa {stain.group(1)}"
+
     other = []
     for i, token in enumerate(tokens):
         low = token.lower()
@@ -63,14 +100,19 @@ def parse_name(path, data_dir):
             row["date"] = token
         elif low in SPECIES and not row["species"]:
             row["species"] = low
+        elif re.fullmatch(r"rabbit\d+c\d+", low) and not row["species"]:
+            row["species"] = "rabbit"                  # "rabbit22011C3": species and ID written as one piece
+        elif i == 0 and token.startswith("UWA") and not row["species"]:
+            row["species"] = "human"                   # human names start with the donor ID, no species word
         elif previous in TREATMENT_AFTER_SPECIES and previous == row["species"] and not row["treatment"]:
             row["treatment"] = token
         elif re.fullmatch(r"p\d+", low) and not row["age"]:
             row["age"] = low
         elif low in SEXES and not row["sex"]:
             row["sex"] = low
-        elif previous in SEXES and not row["animal"]:
-            row["animal"] = token                      # date_species_treatment_age_sex_ID
+        elif REGION.fullmatch(low) and not row["region"]:
+            code = REGION.fullmatch(low).group(1)
+            row["region"] = REGION_ALIASES.get(code, code)
         elif re.fullmatch(r"slide\d+", low):
             row["slide"] = low
         elif re.fullmatch(r"slice\d+", low):
@@ -81,14 +123,16 @@ def parse_name(path, data_dir):
             other.append(token)
     row["other"] = "_".join(other)
 
+    # Some folders say the age instead of the file name (pig/p1/..., pig/adult/...)
+    first_subfolder = relative.parts[1].lower() if len(relative.parts) > 2 else ""
+    if not row["age"] and re.fullmatch(r"p\d+|adult", first_subfolder):
+        row["age"] = first_subfolder
+
     # What the training code's own function calls this animal, to compare with the column above.
     row["animal_by_package"] = extract_animal_id(str(path))
-    if not row["animal"]:
-        row["animal"] = row["animal_by_package"]
-    elif row["species"]:
-        row["animal"] = f"{row['species']}_{row['animal']}"
+    row["animal"] = find_animal(row, tokens) or row["animal_by_package"]
     if not row["species"]:
-        row["species"] = f"({row['folder']})"          # e.g. human files carry no species word
+        row["species"] = f"({row['folder']})"
     return row
 
 
@@ -174,7 +218,7 @@ def main():
             out(f"    ... and {len(templates) - 12} more")
 
     out("\n3. PIECES OF THE NAMES THIS SCRIPT DID NOT RECOGNISE   (# stands for any number)")
-    out("   These are the candidates for brain region, stain, channel, processing step, ...")
+    out("   Look here for new brain-region codes, channels, processing steps, ...")
     for folder in folders:
         unknown = Counter()
         for r in rows:
@@ -189,7 +233,7 @@ def main():
 
     # ---- 4. counts -------------------------------------------------------------
     out("\n4. COUNTS OF FILES")
-    for column in ["species", "magnification", "treatment", "age", "sex", "quadrant"]:
+    for column in ["species", "magnification", "stain", "region", "treatment", "age", "sex", "quadrant"]:
         table(rows, "folder", column, out, f"folder x {column}")
     table(rows, "treatment", "magnification", out, "treatment x magnification")
     table(rows, "folder", "date", out, "folder x imaging date")
