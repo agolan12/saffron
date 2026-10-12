@@ -1,0 +1,304 @@
+SAFFRON SUPCON TRAINING: CHANGES TO MAKE AND HOW TO READ THE RESULTS
+Written 2026-10-09, for branch new_supconloss_training_loop (commit 1d56518)
+
+Line numbers refer to the files as they are today and shift as you edit.
+The training script is scripts/supconloss_test_old.py (despite the name, it is
+the current one).
+
+
+==========================================================================
+PART 1. CHANGES TO MAKE
+==========================================================================
+
+Do them in this order. 1 to 3 are bugs; 4 and 5 are settings.
+
+--------------------------------------------------------------------------
+[x] 1. Validation loss is wrong  (ALREADY EDITED on the Mac, NOT yet committed)
+--------------------------------------------------------------------------
+File:  src/saffron/data/datasets.py, end of split_indices_by_image
+
+Problem: validation files came out in folder order, so most validation
+batches held one class. SupConLoss returns 0 for a batch with no negatives,
+and those zeros were averaged in. That is why the run printed Loss=1.2:
+about 3 of 12 batches had two classes, and 3 x 4.8 / 12 = 1.2.
+
+Fix (already in the file): the validation order is shuffled once with a
+fixed seed. Batches mix classes; the order is identical every epoch and run.
+
+Not affected: validation accuracy and the UMAPs.
+
+How to check after the next run: the epoch line should start with a Loss
+near 4.8, not 1.2 (see Part 3 for why 4.8).
+
+--------------------------------------------------------------------------
+[x] 2. Stage 2 crashes  (freeze_backbone)
+--------------------------------------------------------------------------
+File:  scripts/supconloss_test_old.py, lines 225-232
+
+Problem: freeze_backbone(model) is called with the MicrogliaCNN (line 461),
+but the function reads model.cnn.cnn1. Only the embedding wrapper has a
+.cnn attribute; the CNN has cnn1 and cnn2 directly. The run dies with
+AttributeError as soon as stage 1 finishes (after ~4-5 hours).
+
+Change:
+    for param in model.cnn.cnn1.parameters():
+    ...
+    for param in model.cnn.cnn2.parameters():
+to:
+    for param in model.cnn1.parameters():
+    ...
+    for param in model.cnn2.parameters():
+
+Also fix the two messages on lines 231-232: the model has no fc2. Only fc1
+(two Linear layers) stays trainable.
+
+How to check: the .out file prints "[+] Backbone frozen." right after
+"[+] Stage 2: Fine-tuning classifier head".
+
+--------------------------------------------------------------------------
+[x] 3. Optimizer gets every weight twice
+--------------------------------------------------------------------------
+File:  scripts/supconloss_test_old.py, lines 434 and 465
+
+Problem: embedding_model is a wrapper around model and shares its weights,
+so list(model.parameters()) + list(embedding_model.parameters()) lists each
+weight twice. This is the first warning in your log (pytorch issue 40967);
+PyTorch says it will become an error.
+
+Change line 434:
+    list(model.parameters()) + list(embedding_model.parameters()),
+to:
+    model.parameters(),
+
+Change lines 464-465:
+    filter(lambda p: p.requires_grad,
+           list(model.parameters()) + list(embedding_model.parameters())),
+to:
+    filter(lambda p: p.requires_grad, model.parameters()),
+
+How to check: the "duplicate parameters" warning is gone from the .err file.
+
+--------------------------------------------------------------------------
+[x] 4. Give the job more CPUs
+--------------------------------------------------------------------------
+Files: scripts/saffron_supconloss_train.slurm
+       scripts/saffron_supconloss_array_train.slurm
+
+Problem: the job has 1 CPU but the data loader starts 2 worker processes
+(the "suggested max number of worker is 1" warning). Batch times alternate
+between ~0.3 s and ~4 s: the GPU is waiting for images.
+
+Add to the #SBATCH block of both files:
+    #SBATCH --cpus-per-task=4
+
+How to check: the DataLoader warning is gone and an epoch takes clearly
+less than the current ~2.5 minutes.
+
+--------------------------------------------------------------------------
+[x] 5. Lower the learning rate
+--------------------------------------------------------------------------
+Why: validation accuracy swings by 10-13 points between epochs (0.86 ->
+0.72 at epochs 11-12) on identical validation images, and several older
+runs collapsed to one class.
+
+Single run: in scripts/saffron_supconloss_train.slurm add the flag
+    --learning_rate=0.0003
+to the python command (line 26-27).
+
+Sweep: in scripts/saffron_supconloss_array_train.slurm
+  - line 21, replace the ten values with four spread evenly on a log scale:
+        LR_VALUES=(0.001 0.0003 0.0001 0.00003)
+  - line 10, match the task count to the list:
+        #SBATCH --array=0-3
+    (Today it says 0-10 for a list of 10 values, so task 10 gets an empty
+    learning rate and fails.)
+
+--------------------------------------------------------------------------
+Optional tidy-ups
+--------------------------------------------------------------------------
+[ ] scripts/test_model_local.py line 87 still passes train=True, which
+    MicrogliaDataset no longer accepts. Delete that line or the script.
+[ ] datasets.py docstring still lists "train: Not used, kept for
+    compatibility".
+[ ] --epochs only sets stage 2. Stage 1 is hard-coded to 100 (line 445), so
+    --epochs=100 means 100 + 100 epochs. At ~2.5 min per epoch that is
+    close to the 12-hour limit.
+[ ] MicrogliaCNN() is built with its default of 6 output classes, but there
+    are 3 labels. MicrogliaCNN(num_classes=3) matches the task.
+[ ] Rename supconloss_test_old.py (for example train_supconloss.py) and
+    update both SLURM files.
+
+
+==========================================================================
+PART 2. GETTING THE CHANGES ONTO HYAK
+==========================================================================
+
+On the Mac, in ~/Projects/Nance_Lab/saffron:
+    git status                      # see what changed
+    git add -u                      # stage edited files
+    git commit -m "Fix stage 2 freeze, validation order, optimizer params"
+    git push
+
+On Hyak:
+    cd /gscratch/cheme/agolan/saffron
+    git pull
+    scancel <jobid>                 # stop the run that is still going
+    cd scripts
+    sbatch saffron_supconloss_train.slurm
+
+(The SLURM files write to logs_output/ and logs_error/ relative to where
+you submit from, which has been scripts/.)
+
+
+==========================================================================
+PART 3. HOW TO READ THE RESULTS
+==========================================================================
+
+--------------------------------------------------------------------------
+Where things are
+--------------------------------------------------------------------------
+logs_output/supconloss_<job>.out   run parameters, dataset counts,
+                                   "[+] Stage ..." messages
+logs_error/supconloss_<job>.err    progress bars with all loss and accuracy
+                                   numbers, plus warnings and any crash
+fig/umap_gyrified_job<id>_task<n>_epoch<NNN>.png   3-class UMAP
+fig/umap_species_job<id>_task<n>_epoch<NNN>.png    5-species UMAP
+fig/validation.png, fig/training.png   curves, overwritten every epoch
+weights_stage1.pt                  weights at the END of stage 1 (the last
+                                   epoch, not the best one)
+
+--------------------------------------------------------------------------
+The two kinds of lines in the .err file
+--------------------------------------------------------------------------
+Batch line:   Batch: 44%| 20/45 [..., Loss=3.29]
+    TRAINING loss for one batch.
+    Stage 1: 0.7 x SupCon loss + 0.3 x cross-entropy loss.
+    Stage 2: cross-entropy only.
+
+Epoch line:   Epoch: 11%| 11/100 [..., Loss=1.18, Acc=0.721]
+    Loss = VALIDATION SupCon loss, averaged over validation batches.
+    Acc  = VALIDATION accuracy (fraction of validation images classified
+           correctly). This is the main number to watch.
+
+--------------------------------------------------------------------------
+Reference numbers: what "knows nothing" looks like
+--------------------------------------------------------------------------
+Validation accuracy
+    0.41   always guessing mice (the largest class: 2,916 of 7,076 files)
+    0.37   always guessing rat
+    0.22   always guessing gyrified
+    An accuracy sitting exactly on one of these means the model predicts a
+    single class for everything.
+
+SupCon loss, batch of 128
+    4.84   = ln(127). Embeddings carry no class information.
+    3.75   roughly the lowest value possible with 3 classes: perfectly
+           separated classes give ln(images of the same class in the batch
+           minus 1), about ln(42) when the batch holds ~43 of each class.
+    So the whole usable range is 4.84 (nothing learned) down to ~3.75
+    (perfect). A value of 4.1 is about two thirds of the way there.
+    (Corrected 2026-10-11: this used to say "goes well below 4.84".)
+    A smaller batch gives a smaller number for the same quality, so only
+    compare runs with the same batch size.
+
+Training loss at the very start of stage 1
+    about 3.9  = 0.7 x 4.84 + 0.3 x 1.79
+    (1.79 = ln 6, because the model currently has 6 outputs.)
+    Your run started at 3.91, which matches.
+
+--------------------------------------------------------------------------
+Things that look like results but are not
+--------------------------------------------------------------------------
+- Loss drops to ~2.2 on the last batch of every epoch (45/45). That batch
+  has about 29 images instead of 128, and SupCon loss shrinks with batch
+  size. Ignore it.
+- Batch loss drops sharply when stage 2 starts. The loss definition changes
+  from the 0.7/0.3 blend to cross-entropy only. It is a change of scale,
+  not an improvement. Compare accuracy across the stage boundary instead.
+- In stage 2 the epoch-line Loss is still the SupCon loss, although stage 2
+  no longer trains on it. Expect it to stay flat or drift.
+- Any validation Loss from runs before change 1 (values near 1.2).
+
+--------------------------------------------------------------------------
+Healthy run
+--------------------------------------------------------------------------
+- Validation accuracy rises over the first 10-20 epochs and then levels
+  off, moving only a few points from epoch to epoch.
+- Validation SupCon loss starts near 4.8 and falls.
+- Training batch loss falls gradually, without sudden jumps.
+
+--------------------------------------------------------------------------
+Warning signs and what they usually mean
+--------------------------------------------------------------------------
+Accuracy stuck at 0.41, 0.37 or 0.22, loss frozen to two decimals
+    Collapse: one class predicted for everything.
+    Lower the learning rate.
+
+Accuracy jumps 10+ points up and down between epochs
+    Steps too large. Lower the learning rate.
+
+Loss is nan or inf
+    Diverged. Lower the learning rate.
+
+Training loss keeps falling, validation accuracy falls or validation loss
+rises
+    Overfitting. Stop earlier or strengthen augmentation.
+
+Accuracy good, but validation SupCon loss stays near 4.8
+    The classifier is learning from the cross-entropy term while the
+    contrastive term contributes little. The UMAPs will look blurry even
+    though accuracy is fine. Things to try, one at a time: lower learning
+    rate, lower ce_weight in stage 1 (line 451, currently 0.3).
+
+Nothing changes at all from epoch 1
+    Check the .out file for the dataset counts and class distribution;
+    a missing folder or zero files shows up there.
+
+--------------------------------------------------------------------------
+Reading the UMAP plots
+--------------------------------------------------------------------------
+Each dot is one validation image; nearby dots have similar embeddings.
+
+umap_gyrified_*: coloured by the 3 training classes (mice, rat, gyrified).
+    Good: three clumps, each mostly one colour.
+umap_species_*: same images, coloured by the 5 species.
+    Shows whether pig, ferret and human, which the model was told are one
+    class, still separate from each other.
+
+Cautions:
+- Only local neighbourhoods are meaningful. The distance between two
+  separate clumps, and the size of a clump, mean little.
+- Compare plots from the same epoch across runs, not one run's epoch 5
+  with another's epoch 50.
+- The layout is computed fresh for every plot, so clumps can swap places
+  between epochs. Look at how mixed the colours are, not where they sit.
+- epoch999 in a filename is the final plot after stage 2.
+
+--------------------------------------------------------------------------
+Comparing runs fairly
+--------------------------------------------------------------------------
+- Only compare runs made after commit 1d56518. Earlier runs split
+  quadrants of the same image across train and validation and augmented
+  the validation images, so their accuracy is inflated and noisy.
+- Change one thing per run and note it (the .out file prints all
+  parameters and the job ID at the top).
+- Record both the best and the last-epoch accuracy. A run that peaks at
+  0.86 and ends at 0.72 is less useful than one that holds 0.82.
+- Same batch size when comparing SupCon loss.
+
+--------------------------------------------------------------------------
+What the accuracy does and does not tell you
+--------------------------------------------------------------------------
+It tells you how well the model classifies images it has not seen.
+It does not tell you how it does on animals it has not seen: the split is
+by image, so the same animal can be on both sides. Expect accuracy on a
+truly new animal to be lower. Splitting by animal is the next step if you
+want that number.
+
+--------------------------------------------------------------------------
+Warnings that are safe to ignore
+--------------------------------------------------------------------------
+- sklearn FutureWarning about force_all_finite (comes from UMAP).
+- umap "n_jobs value -1 overridden to 1" (a side effect of the fixed seed).
+- DataLoader "suggested max number of worker" (goes away with change 4).
+- "duplicate parameters" (goes away with change 3).

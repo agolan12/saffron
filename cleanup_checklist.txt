@@ -1,0 +1,236 @@
+SAFFRON CLEANUP CHECKLIST
+Old / unused code that could be deleted
+Written 2026-10-08, against branch new_supconloss_training_loop (commit e10c52b)
+plus the uncommitted local version of src/saffron/data/datasets.py.
+
+How this was produced: a text search of the whole repo for every function,
+class and import, plus reading the SLURM files to see which scripts actually
+get run. Nothing was executed, so anything you call by hand on the cluster
+(not through a SLURM file in this repo) would not show up as "used".
+
+Tags:
+  [SAFE]   nothing in the repo uses it
+  [CHECK]  unused by the SupCon work, but still wired to something, or written
+           by Nels -- confirm before deleting
+
+Line numbers refer to the files as they are today and will shift as you delete.
+
+
+==========================================================================
+READ THIS FIRST: the file names are misleading
+==========================================================================
+
+  scripts/supconloss_test_old.py  is the CURRENT training loop.
+      - last changed 2026-10-08
+      - it is what both SupCon SLURM files run
+      - it has the 5-species UMAP and job/task IDs in figure names
+
+  scripts/test_supconloss.py      is the OLDER iteration.
+      - last changed 2026-04-15
+      - no SLURM file runs it
+
+Do not delete by name. Suggested fix once the old one is gone: rename
+supconloss_test_old.py to something like train_supconloss.py and update the
+two SLURM files.
+
+
+==========================================================================
+1. src/saffron/data/datasets.py
+==========================================================================
+
+Used by the SupCon scripts (KEEP):
+  MicrogliaDataset, _get_class_distribution, generate_dataloaders
+
+Small leftovers inside the part you use:
+[x] [SAFE]  `train=True` argument of MicrogliaDataset.__init__ (line 96).
+            Accepted and ignored. If you remove it, also remove `train=True`
+            from the calls in supconloss_test_old.py (lines 110, 119),
+            test_supconloss.py (109) and test_model_local.py (87).
+[x] [SAFE]  "# test class added by assaf" comment (line 89) -- outdated.
+[ ] [SAFE]  `val_split` parameter of generate_dataloaders (line 166). It
+            works, but no caller ever passes it; it is always 0.2. Keep it
+            if you want the option, otherwise hard-code.
+
+Patch-pair pipeline (masked image + positive/negative patches). None of the
+SupCon scripts use it; only scripts/contrastive_demo.py does:
+[ ] [CHECK] get_random_patch_position      lines 7-20
+[ ] [CHECK] extract_patch                  lines 23-31
+[ ] [CHECK] create_masked_image            lines 34-43
+[ ] [CHECK] class PatchPairDataset         lines 46-87
+[ ] [CHECK] create_dataloaders             lines 235-273
+[ ] [CHECK] load_split_files               lines 276-292
+[ ] [CHECK] `if __name__ == "__main__":` self-test, lines 295-315
+            (only tests PatchPairDataset; writes /tmp/test_image.npy)
+[ ] [CHECK] `from typing import List, Tuple` (line 4) -- only needed by the
+            functions above; remove together with them.
+
+    These go together with section 2c (contrastive_demo.py). If you delete
+    them you must also empty src/saffron/data/__init__.py, which imports all
+    six names -- otherwise `import saffron.data` breaks.
+
+
+==========================================================================
+2. Older training loops (scripts/)
+==========================================================================
+
+2a. Previous SupCon iteration
+[x] [SAFE]  scripts/test_supconloss.py (404 lines)
+            Superseded by supconloss_test_old.py. Single UMAP/t-SNE, default
+            learning rate 0.005, no job IDs in figure names. No SLURM file
+            runs it. Also contains a dead string-as-comment block at
+            lines 173-174.
+
+2b. Cross-entropy-only loop (Feb 2026, before SupCon)
+[ ] [CHECK] scripts/test_model_local.py (268 lines)
+            Plain CrossEntropyLoss training of MicrogliaCNN. Only run by the
+            two TML SLURM files below. Its device_check / make_dataloaders /
+            train functions are older copies of the ones in the SupCon script.
+[ ] [CHECK] scripts/saffron_TML_train.slurm   (runs test_model_local.py, 10 epochs)
+[ ] [CHECK] scripts/saffron_TML2_train.slurm  (runs test_model_local.py, 30 epochs)
+
+2c. Patch-pair contrastive demo (Feb 2026)
+[x] [CHECK] scripts/contrastive_demo.py (202 lines)
+            The only user of PatchPairDataset, ContrastiveLoss and
+            ContrastiveModel. Unused imports inside it: os, nn, time.
+[x] [CHECK] scripts/saffron_contrastive_demo_train.slurm
+[x] [CHECK] checkpoints/*.pt (9 files, 405 MB, tracked in git)
+            Written by contrastive_demo.py (best_model.pt,
+            checkpoint_epoch_5..40.pt).
+
+2d. One-off data split job
+[ ] [CHECK] scripts/saffron_TTS_test.slurm
+            Runs train_test_split.py on the rabbit data. Keep
+            scripts/train_test_split.py itself if you still split data.
+
+
+==========================================================================
+3. Inside the current training loop (scripts/supconloss_test_old.py)
+==========================================================================
+
+[ ] [SAFE]  Unused imports: `from saffron.io import data_io` (line 15),
+            `from saffron.data import data_processing` (line 17).
+[ ] [SAFE]  Commented-out line 85:
+            `# images = data_io.load_images_from_directory(images_path)`
+[ ] [SAFE]  DEBUG directory-structure printout, lines 87-106. Only prints;
+            delete once you no longer need it in the .out files.
+[ ] [SAFE]  `--split` argument (lines 369-372). Parsed, never used; the
+            split is fixed at 80/20 inside generate_dataloaders.
+[ ] [SAFE]  Return values of both train() calls are never used:
+            `val_accuracy, val_loss, train_loss` (line 429) and
+            `val_accuracy_ft, val_loss_ft, train_loss_ft` (line 458).
+[ ] [SAFE]  `list(embedding_model.parameters())` in both optimizers
+            (lines 422, 453). The wrapper shares its weights with `model`,
+            so every parameter is passed twice; `model.parameters()` alone
+            is the same thing.
+[ ] [SAFE]  Discarded half of the species split, line 127:
+            `_, species_val = generate_dataloaders(species_dataset, ...)`
+            builds a training loader and weighted sampler that are thrown
+            away.
+
+
+==========================================================================
+4. Unused code in other modules
+==========================================================================
+
+src/saffron/models/torch_models.py
+            (All imports at the top of this file are in use -- but most of
+            them only by the contrastive classes below. If those classes go,
+            re-check the imports.)
+[ ] [CHECK] create_contrastive_model (lines 247-259) -- only called by the
+            self-test at the bottom of the same file.
+[ ] [CHECK] `if __name__ == "__main__":` self-test, lines 262-290.
+[ ] [CHECK] BackboneEncoder, ResNetEncoder, ProjectionHead, ContrastiveModel
+            (lines 60-244) -- only used by contrastive_demo.py. Delete only
+            if section 2c goes.
+
+src/saffron/models/loss_functions.py
+[ ] [CHECK] class ContrastiveLoss (lines 32-86) and its self-test
+            (lines 89-111) -- only used by contrastive_demo.py. If removed,
+            also drop it from src/saffron/__init__.py. KEEP SupConLoss.
+
+src/saffron/data/__init__.py
+[ ] [SAFE]  Docstring "Add this to: src/saffron/data/__init__.py" (lines
+            1-3) and the "# Add to __all__" comment -- pasted instructions.
+
+Written by Nels -- unused in the repo, but ask before touching:
+[ ] [CHECK] src/saffron/data/preprocessing.py: unused imports data_io,
+            data_processing, datasets, torch_models (lines 3-5);
+            plot_examples (197-228) and preprocess_directory (264-309) are
+            never called from inside the repo.
+[ ] [CHECK] src/saffron/data/data_processing.py: extract_animal_id
+            (lines 35-95) is never called.
+[ ] [CHECK] src/saffron/data/validation.py: unused `import numpy as np`;
+            validate_image_shapes is never called from inside the repo.
+
+tests/
+[ ] [CHECK] tests/test_file_io.py and tests/test_data_processing.py are
+            byte-for-byte identical (561 lines each). One is a duplicate.
+[ ] [CHECK] tests/test_datasets.py is empty (0 lines).
+[ ] [CHECK] Both test files import extract_patch and create_masked_image
+            from saffron.data.data_processing, but those functions live in
+            saffron.data.datasets -- the import should fail as written.
+
+
+==========================================================================
+5. Generated output tracked in git
+==========================================================================
+
+These are results, not code. Removing them from git does not delete them
+from the cluster if you use `git rm --cached`.
+
+[ ] [CHECK] fig/*.png -- 814 files. .gitignore now ignores *.png, but that
+            only affects new files; these are still tracked.
+[ ] [CHECK] scripts/logs_output/ -- 48 .out files
+[ ] [CHECK] scripts/logs_error/  -- 42 .err files
+[ ] [CHECK] checkpoints/*.pt -- 405 MB (same item as in 2c)
+
+    Suggested .gitignore additions if you untrack them:
+        scripts/logs_output/
+        scripts/logs_error/
+        checkpoints/
+        *.pt
+
+
+==========================================================================
+6. Not dead code, but found while looking -- worth fixing
+==========================================================================
+
+[ ] BUG: stage 2 of supconloss_test_old.py crashes.
+    freeze_backbone(model) (line 449) is given the MicrogliaCNN, but the
+    function reads `model.cnn.cnn1` / `model.cnn.cnn2` (lines 215-218).
+    MicrogliaCNN has `cnn1` and `cnn2` directly and no `.cnn` attribute
+    (only the embedding wrapper has `.cnn`), so this raises AttributeError
+    after stage 1 finishes. Consistent with the logs: the one run that
+    reached "Stage 2" (output_supconloss_test_gyrified_lr005.out) never
+    printed "Backbone frozen" or "Generating final embeddings".
+    Fix: pass embedding_model, or change the function to use model.cnn1 /
+    model.cnn2.
+
+[ ] The freeze_backbone docstring and print mention "fc1 and fc2", but
+    MicrogliaCNN only has fc1 (two Linear layers inside one Sequential).
+
+[ ] `--epochs` only controls stage 2. Stage 1 is hard-coded to 100 epochs
+    (line 433), so `--epochs=100` in the SLURM files means 100 + 100.
+
+[ ] `-w/--weights` help text says "store or load", but the script never
+    loads weights; it only saves to that path each epoch.
+
+[ ] MicrogliaCNN defaults to num_classes=6, while the SupCon script trains
+    on 3 labels (mice, rat, gyrified). It runs, but three output units are
+    never a correct answer.
+
+[ ] 30 of the error logs end in "CUDA error: CUDA-capable device(s) is/are
+    busy or unavailable" -- those array tasks never trained.
+
+
+==========================================================================
+Suggested order
+==========================================================================
+
+  1. Section 3 and the [SAFE] items in sections 1 and 4 -- no risk.
+  2. Delete scripts/test_supconloss.py, then rename supconloss_test_old.py.
+  3. Decide whether the patch-pair demo (2c) and the CE-only loop (2b) are
+     still wanted. If not, delete each group together with the pieces listed
+     as depending on it.
+  4. Ask Nels about the items marked as written by Nels.
+  5. Untrack generated output (section 5).

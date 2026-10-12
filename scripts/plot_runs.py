@@ -5,13 +5,14 @@ For each run it plots, per epoch:
     - training loss (mean of the batch losses shown on the Batch bar)
     - validation SupCon loss   (Loss= on the Epoch bar)
     - validation accuracy      (Acc=  on the Epoch bar)
-and prints a summary table.
+and prints a summary table, which is also saved next to the image (same name, .txt).
 
 Usage (from the folder that holds logs_error/):
     python plot_runs.py logs_error/supconloss_12345678_*.err
     python plot_runs.py logs_error/a.err logs_error/b.err -o my_comparison.png
 
-Each run is labelled with its learning rate, read from the matching
+Each run is labelled with its settings (learning rate, ce_weight, and the stage 2 /
+learning-rate-drop options when they are switched on), read from the matching
 logs_output/*.out file when it exists, otherwise with the file name.
 """
 
@@ -80,7 +81,7 @@ def parse_log(path):
 
 
 def run_label(err_path):
-    """'lr 0.0003' from the matching .out file, else the file name."""
+    """'lr 0.0003, ce 0.5, head only' from the matching .out file, else the file name."""
     err_path = Path(err_path)
     candidates = [
         Path(str(err_path).replace("logs_error", "logs_output")).with_suffix(".out"),
@@ -94,6 +95,15 @@ def run_label(err_path):
                 match = re.search(rf"{name}\s*=\s*(\S+)", text)
                 if match:
                     parts.append(f"{short} {float(match.group(1)):g}")
+            # options that only appear in the label when they differ from the original recipe
+            if re.search(r"stage2_head_only\s*=\s*True", text):
+                parts.append("head only")
+            match = re.search(r"lr_drop_epoch\s*=\s*(\d+)", text)
+            if match and int(match.group(1)) > 0:
+                parts.append(f"lr drop {match.group(1)}")
+            match = re.search(r"stage2_lr\s*=\s*([-+.\de]+)", text)
+            if match:
+                parts.append(f"s2 lr {float(match.group(1)):g}")
             if parts:
                 return ", ".join(parts)
     return err_path.stem
@@ -157,14 +167,19 @@ def main():
     fig.savefig(args.output, dpi=150)
     print(f"wrote {args.output}\n")
 
-    # summary table
-    print(f"{'run':<14}{'stage':>6}{'epochs':>8}{'best acc':>10}{'at epoch':>10}{'last acc':>10}{'last val loss':>15}{'last train loss':>17}")
+    # summary table, printed and saved next to the image
+    width = max(len(run["label"]) for run in runs) + 2
+    table = [f"{'run':<{width}}{'stage':>6}{'epochs':>8}{'best acc':>10}{'at epoch':>10}{'last acc':>10}{'last val loss':>15}{'last train loss':>17}"]
     for run in runs:
         for i, stage in enumerate(run["stages"], start=1):
             acc = stage["val_acc"]
             best = int(np.argmax(acc))
-            print(f"{run['label']:<14}{i:>6}{len(acc):>8}{acc[best]:>10.3f}{best + 1:>10}{acc[-1]:>10.3f}"
-                  f"{stage['val_loss'][-1]:>15.3g}{stage['train_loss'][-1]:>17.3g}")
+            table.append(f"{run['label']:<{width}}{i:>6}{len(acc):>8}{acc[best]:>10.3f}{best + 1:>10}{acc[-1]:>10.3f}"
+                         f"{stage['val_loss'][-1]:>15.3g}{stage['train_loss'][-1]:>17.3g}")
+    print("\n".join(table))
+    table_path = Path(args.output).with_suffix(".txt")
+    table_path.write_text("\n".join(table) + "\n")
+    print(f"\nwrote {table_path}")
 
 
 if __name__ == "__main__":

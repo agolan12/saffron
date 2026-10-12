@@ -1,0 +1,350 @@
+SAFFRON: NEXT EXPERIMENTS, TO-DO LIST AND IMPLEMENTATION STEPS
+Written 2026-10-11, for branch new_supconloss_training_loop
+
+Training script = scripts/supconloss_test_old.py. Line numbers are as of today.
+Phases are in the order I suggest doing them. "WHY FIRST" notes explain the order.
+
+Suggested order at a glance:
+    A. Finish the ce_weight sweep                      (running / about to run)
+    B. Groundwork: save weights + metrics per run      (before any further sweep)
+    C. Find where learning stabilises                  (uses A's logs, then B)
+    D. Test script + confusion matrix, then sweeps     (needs B's saved weights)
+    E. Unsupervised training script                    (reuses B and D)
+    F. Autoencoder, diseased vs healthy                (F1 can be done today)
+
+Can be done now, while the ce sweep runs: B (code only), D1-D2, F1.
+
+
+==========================================================================
+A. FINISH THE CE_WEIGHT SWEEP
+==========================================================================
+[ ] A1. Fix scripts/saffron_supconloss_array_train.slurm: add the missing "\"
+        after --epochs=100. Without it every task runs ce_weight=0.3.
+[ ] A2. If the sweep has not been resubmitted yet, do B1 first (5 lines).
+        Otherwise the five tasks all overwrite the same weights_stage1.pt and
+        none of them can be tested in phase D without retraining.
+[ ] A3. After submitting, check that the sweep took effect:
+            grep ce_weight logs_output/supconloss_<jobid>_*.out
+        Expect five different values.
+[ ] A4. Fix run_label in plot_runs.py ("if parts:" lines up with the inner
+        "for", not inside it), then plot the five runs.
+[ ] A5. Commit plot_runs.py (it is still untracked in git) so the Mac and Hyak
+        copies stop drifting apart.
+[ ] A6. Pick a ce_weight. Compare on:
+          - validation accuracy, best AND last epoch, at the end of stage 2
+          - validation SupCon loss (same batch size, so comparable)
+          - the UMAPs at the same epoch
+        Do NOT compare the training-loss panel across runs: each ce_weight
+        blends the two losses differently, so the scales differ.
+        ce_weight=0.0: stage 1 accuracy is meaningless (the head is untrained);
+        judge that run only after stage 2.
+
+Suggestion: one run per value cannot separate a real difference from luck.
+Earlier runs moved 10+ points between epochs. Once two or three ce values
+look best, rerun just those with 2-3 different seeds (see B4) before deciding.
+
+
+==========================================================================
+B. GROUNDWORK IN THE TRAINING SCRIPT
+==========================================================================
+WHY FIRST: phases C, D and E all need weights and per-epoch numbers saved per
+run. Today they are not, so every sweep run before this has to be repeated.
+
+[ ] B1. Save weights per run, not to one shared file.
+        Now: line 552 writes "weights_stage1.pt" in the working directory, so
+        all array tasks overwrite each other. The final stage 2 weights are
+        saved only if --weights is passed, also to one shared path.
+        Change: build a run folder from the IDs the script already has,
+            run_dir = Path("runs") / f"job{job_id}_task{task_id}"
+        and save into it:
+            stage1_last.pt     end of stage 1
+            stage1_best.pt     stage 1 epoch with the best validation accuracy
+            final.pt           end of stage 2
+            final_best.pt      stage 2 epoch with the best validation accuracy
+        Add runs/ and *.pt to .gitignore.
+
+[ ] B2. Save the run's parameters next to the weights.
+            json.dump(vars(args), open(run_dir / "params.json", "w"), indent=2)
+        The test script (D) needs kernel_size, stride, pool and pool_size to
+        rebuild the model before it can load the weights. Reading them from
+        params.json removes the chance of rebuilding the wrong architecture.
+
+[ ] B3. Write per-epoch numbers to runs/<run>/metrics.csv, one row per epoch:
+            stage, epoch, train_loss, train_supcon, train_ce,
+            val_supcon, val_ce, val_acc, seconds
+        Then plot_runs.py can read the CSV (pandas.read_csv) instead of
+        picking numbers out of the progress bars with a regex, and adding a
+        new curve becomes one line. Keep the regex path for the old logs.
+        Also move fig/validation.png and fig/training.png into run_dir; today
+        every array task overwrites the same two files.
+
+[ ] B4. Add --seed (default 0): torch.manual_seed(seed), np.random.seed(seed).
+        Keep the data split seed fixed at 42 as it is; only model
+        initialisation and batch order should change with --seed.
+
+[ ] B5. Add --stage1_weights: if given, load them and skip stage 1.
+        Needed for C3, and it lets a stage 2 crash be retried without
+        repeating hours of stage 1.
+
+[ ] B6. Pass num_classes=3 to ConfigurableMicrogliaCNN (line 516). It still
+        defaults to 6 outputs for 3 classes. Do this BEFORE the architecture
+        sweep in D, and rerun the chosen ce_weight once afterwards as the new
+        baseline, since it changes the cross-entropy scale (ln 3 = 1.10
+        instead of ln 6 = 1.79 at the start).
+
+[ ] B7. (Tidy) Move make_dataloaders, device_check, visualize_embeddings and
+        the new run-folder/metrics code into src/saffron, so the scripts in D,
+        E and F import them instead of each holding a copy.
+        Rename supconloss_test_old.py to train_supcon.py; update both SLURM
+        files. Delete scripts/test_model_local.py (it no longer runs).
+
+
+==========================================================================
+C. WHERE DOES LEARNING STABILISE? (how many epochs)
+==========================================================================
+There are two different questions here. Answer them separately.
+
+[ ] C1. Stage 2 length (easy, answer from the ce sweep logs).
+        Only the classifier head trains, on a frozen backbone, so expect it to
+        level off within a few tens of epochs.
+        Add a "plateau epoch" column to the plot_runs.py summary table:
+          - smooth validation accuracy with a 5-epoch running mean
+          - plateau epoch = first epoch where the smoothed value is within
+            0.01 of its maximum for that stage
+        Use the smoothed curve; the raw one is too jumpy to read a plateau from.
+
+[ ] C2. Stage 1 length, first look (also from the ce sweep logs).
+        Same plateau column, applied to stage 1, on validation SupCon loss as
+        well as accuracy. Also look for the overfitting sign: training loss
+        still falling while validation SupCon loss turns upward.
+
+[ ] C3. Stage 1 length, the real test (needs B1 and B5).
+        The plateau of the stage 1 curve is not quite the question. What you
+        want is: which stage 1 length gives the best accuracy AFTER stage 2.
+          - one stage 1 run of 100 epochs, saving weights every 10 epochs
+            (stage1_epoch010.pt, 020, ...)
+          - for each saved file, run stage 2 only (--stage1_weights), as an
+            array job. These are short.
+          - plot final validation accuracy against stage 1 epochs.
+        This is the only way to answer it for ce_weight=0.0, where stage 1
+        prints no usable accuracy.
+
+[ ] C4. Add early stopping so the answer does not have to be re-found for
+        every architecture: --patience N stops a stage when the smoothed
+        validation accuracy (stage 1 with ce_weight=0: validation SupCon loss)
+        has not improved for N epochs. Start with N=15. With B1 the best epoch
+        is saved either way.
+
+[ ] C5. Set --stage1_epochs and --epochs to the plateau plus a margin.
+        WHY BEFORE D: a run is ~200 epochs at ~2.5 min = over 8 hours today.
+        If learning levels off at 40 + 20 epochs, each sweep run in D costs a
+        third of that, and you stay far from the 12-hour limit.
+
+
+==========================================================================
+D. TEST SCRIPT, CONFUSION MATRIX, MULTI-PARAMETER SWEEPS
+==========================================================================
+[ ] D1. Decide what "test" means. This is a decision to make, not just code.
+        Today there are only two sets, train and validation, split by image.
+        Two consequences:
+          a) Validation is what you use to pick ce_weight, kernel size and so
+             on. A number measured on the set you tuned on is optimistic. A
+             separate test set, used once at the very end, gives the honest
+             number.
+          b) The same animal is on both sides of the split, so accuracy on a
+             new animal will be lower than what you see now.
+        Suggestion: set aside test ANIMALS once, write their file names to a
+        text file committed to the repo, and never train or tune on them.
+        train_test_split_by_animal in src/saffron/data/data_processing.py
+        already groups files by animal.
+        First count animals per species (group_by_animal). If a species has
+        only 2-3 animals, a by-animal test set for it is very small; say so
+        when reporting, or use leave-one-animal-out for that species.
+        Use VALIDATION for all comparisons in D4-D6 and the test set only for
+        the final chosen model.
+
+[ ] D2. Write scripts/evaluate.py.
+            python scripts/evaluate.py --run runs/job123_task4 --split val
+        Steps inside:
+          1. read params.json, build ConfigurableMicrogliaCNN from it
+          2. load final_best.pt, model.eval(), torch.no_grad()
+          3. run the validation (or test) loader, collect labels and predictions
+          4. sklearn.metrics.confusion_matrix and classification_report
+             (scikit-learn is already a dependency)
+          5. save into the run folder: confusion_<split>.csv (raw counts),
+             confusion_<split>.png, metrics_<split>.json
+        Plot with ConfusionMatrixDisplay, normalize="true" (each row sums to
+        1) and print the raw counts too. The classes are unbalanced
+        (41% / 37% / 22%), so raw counts alone make mice look best simply
+        because there are more of them.
+
+[ ] D3. Report more than accuracy: per-class recall and balanced accuracy
+        (the mean of the per-class recalls). A model can reach 0.78 accuracy
+        while doing badly on gyrified, the smallest class.
+        Also make a 5-row version: rows = true species (mice, rat, human,
+        ferret, pig), columns = predicted class. It shows WHICH gyrified
+        species gets misclassified. The species loader already exists
+        (species_val) and uses the same split.
+
+[ ] D4. Sweep list file instead of one bash array per parameter.
+        scripts/sweep.txt, one run per line:
+            --ce_weight=0.3 --kernel_size=12 --stride=2
+            --ce_weight=0.3 --kernel_size=8  --stride=2
+        In the SLURM file:
+            ARGS=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" scripts/sweep.txt)
+            python scripts/train_supcon.py --batch_size=128 $ARGS
+        and set --array=0-(number of lines minus 1). Commit sweep.txt with the
+        job ID in the commit message so every sweep is on record.
+
+[ ] D5. Sweep ONE parameter at a time around the baseline first.
+        A full grid is not affordable: 5 ce x 3 kernel x 3 stride x 3 pool =
+        135 runs. Instead:
+          round 1: baseline, then change one thing per run
+                   kernel_size (e.g. 6, 12, 20), stride (1, 2, 4),
+                   pool (mixed, avg, max), pool_size, learning_rate
+                   ("step size": I took this to mean stride; if you meant the
+                   optimiser step, that is learning_rate, already a flag)
+          round 2: small grid over only the 2-3 parameters that mattered
+        Notes:
+          - some kernel/stride pairs exceed MAX_FLATTENED_SIZE (too big for
+            the 11 GB GPU); the script already refuses those
+          - keep batch size fixed at 128, or compare accuracy only: SupCon
+            loss changes with batch size
+          - SupConLoss temperature (0.07, hard-coded on line 525) is worth
+            exposing as a flag and trying 0.1 and 0.2
+
+[ ] D6. scripts/compare_runs.py: takes several run folders and writes
+          - one figure with the confusion matrices side by side, each titled
+            with only the parameters that DIFFER between the runs
+          - a table (CSV) of parameters + best val accuracy + balanced
+            accuracy + per-class recall, sorted by balanced accuracy
+
+[ ] D7. Final: 3 seeds of the chosen configuration, evaluate.py --split test
+        once, report mean and spread.
+
+
+==========================================================================
+E. UNSUPERVISED (SELF-SUPERVISED) TRAINING SCRIPT
+==========================================================================
+WHY AFTER D: the comparison is only meaningful if both models are scored by
+the same evaluation code on the same split.
+
+[ ] E1. Look at what is already in the repo before writing anything:
+          src/saffron/models/torch_models.py: ContrastiveModel, ResNetEncoder,
+              ProjectionHead, create_contrastive_model
+          src/saffron/models/loss_functions.py: ContrastiveLoss
+          src/saffron/data/datasets.py: PatchPairDataset
+          checkpoints/: checkpoint_epoch_*.pt, best_model.pt
+        These appear to be from an earlier contrastive attempt. Decide whether
+        to reuse or retire them; do not leave two parallel versions.
+
+[ ] E2. New script scripts/train_simclr.py (do not add more branches to the
+        SupCon script). Method: SimCLR.
+          - each image is augmented twice, giving two "views"
+          - the loss (NT-Xent) pulls the two views of the same image together
+            and pushes all other images in the batch away; no labels used
+          - NTXentLoss is in pytorch-metric-learning, already installed
+        Implementation: a dataset wrapper that returns (view1, view2) by
+        applying the training transform twice; concatenate to a 2N batch;
+        labels = torch.arange(N) repeated twice; loss = NTXentLoss(emb, labels).
+
+[ ] E3. Keep everything else identical to the supervised run, so the only
+        difference is "labels or no labels":
+          - same backbone (ConfigurableMicrogliaCNN) and 500-d embedding
+          - same train/validation split
+          - same stage 2: freeze the backbone, train the head with
+            cross-entropy (this step does use labels; it is the standard
+            "linear probe" way of scoring unsupervised features)
+          - same evaluate.py, confusion matrix and UMAPs
+        The fairest supervised partner is the ce_weight=0.0 run: SupCon with
+        labels against the same contrastive idea without labels.
+
+[ ] E4. Add a floor baseline: stage 2 only, on a randomly initialised frozen
+        backbone (no stage 1 at all). If SimCLR does not clearly beat this, it
+        learned nothing useful. Costs one short run.
+
+[ ] E5. Augmentations decide whether SimCLR works. The current ones (flips,
+        15 degree rotation, 0.2 brightness/contrast) are too mild: the two
+        views are nearly identical, so the task is trivially easy. Add
+        RandomResizedCrop (scale 0.3-1.0), rotations by any angle, Gaussian
+        blur, stronger brightness/contrast. Try temperature 0.1-0.5 (0.07 is
+        tuned for the supervised loss). Expect it to need more epochs than
+        SupCon.
+
+[ ] E6. Check for shortcuts. File names show both 60x images and 10x
+        tilescans. If magnification, stain batch or microscope differs by
+        species, any model (supervised too) can separate species from that
+        instead of from microglia shape. Colour one UMAP by magnification and
+        one by imaging date. If the clumps follow those, fix the data
+        selection before trusting any accuracy.
+        Suggestion: do this check early; it affects A-D as well.
+
+
+==========================================================================
+F. AUTOENCODER: DISEASED VS HEALTHY
+==========================================================================
+[ ] F1. Inventory the labels FIRST (can be done today, it is one script).
+        The classes so far are species. Condition is only in the file names
+        (..._mouse_saline_p12_..., ..._rat_nontreated_p70_...).
+        Write scripts/build_metadata.py: walk the data folder on Hyak, split
+        each file name, write metadata.csv with columns
+            file, species, treatment, age, sex, animal, region,
+            magnification, quadrant, date
+        Then count images AND animals per (species, treatment).
+        Questions this answers, and that decide whether F is feasible:
+          - which treatment values count as diseased, which as healthy
+            (confirm with the lab, do not guess from the names)
+          - is there a species with both conditions, at the same age and
+            magnification? The comparison has to be within one species;
+            across species the model would just find species again.
+          - how many animals per condition? With 3 per group, any image-level
+            result is weak.
+        metadata.csv also gives you E6 and the by-animal split in D1.
+
+[ ] F2. New script scripts/train_autoencoder.py and a ConvAutoencoder class.
+          encoder: the two convolution blocks of the CNN (or a plain stack of
+                   Conv2d stride 2 + ReLU), then a bottleneck of ~128-500
+                   numbers
+          decoder: mirror of the encoder with ConvTranspose2d (or Upsample +
+                   Conv2d, which gives fewer checkerboard artefacts)
+          output:  Tanh, because inputs are normalised to [-1, 1]
+          loss:    MSE between input and reconstruction to start
+        Start at 256x256 or on random crops: it trains much faster and you
+        will iterate on the architecture a lot.
+        Reuse the run folder, metrics.csv and split code from B.
+
+[ ] F3. Sanity checks before any biology:
+          - it can overfit 16 images (reconstructions look nearly exact);
+            if not, there is a bug
+          - save a grid of input / reconstruction pairs every few epochs;
+            looking at them tells you more than the loss number
+          - shrink the bottleneck until reconstructions degrade; the useful
+            size is just above that point
+
+[ ] F4. Known weakness to plan for: a plain MSE autoencoder mostly learns
+        brightness and background, and blurs fine processes, which is where
+        microglia morphology lives. If F3 shows blurry cells, switch to a
+        masked or denoising version: hide random patches of the input and
+        make the network fill them in. create_masked_image in datasets.py
+        already does the masking.
+
+[ ] F5. Two ways to ask "did it learn disease features". Do (a) first.
+        (a) Train on all images, then study the bottleneck vectors:
+              - UMAP coloured by condition (and by animal, age, magnification)
+              - train a linear classifier on the vectors: healthy vs diseased,
+                split by ANIMAL
+        (b) Train on healthy images only, then compare reconstruction error on
+            held-out healthy vs diseased images. Higher error on diseased
+            means they look unlike anything it learned.
+            Caution: error also rises with brightness and with how much
+            structure is in the image, so compare within one species, age and
+            magnification.
+
+[ ] F6. Controls, so a positive result can be believed:
+          - shuffle the condition labels and repeat F5(a); accuracy should
+            fall to chance
+          - report per animal, not per image: 400 images from 4 animals are
+            4 independent samples, not 400
+          - compare against the supervised and SimCLR embeddings scored the
+            same way (linear classifier on healthy vs diseased). That is the
+            link back to phases D and E.

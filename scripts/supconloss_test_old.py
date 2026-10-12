@@ -282,14 +282,25 @@ def visualize_embeddings(
     )
 
 
-def freeze_backbone(model):
-    """Freeze everything except the last two FC layers."""
+def freeze_backbone(model, head_only=False):
+    """
+    Freeze the convolutions for stage 2.
+
+    head_only=False: both FC layers stay trainable. fc1[0] produces the 500-d embedding,
+    so stage 2 keeps changing the embedding that stage 1 learned.
+    head_only=True: fc1[0] is frozen too and only the last layer (500 -> classes) trains.
+    Stage 2 accuracy then measures the stage 1 embedding as it is (a linear probe).
+    """
     for param in model.cnn1.parameters():
         param.requires_grad = False
     for param in model.cnn2.parameters():
         param.requires_grad = False
-    # fc trainable
-    print("[+] Backbone frozen. Only fc stays trainable.")
+    if head_only:
+        for param in model.fc1[0].parameters():
+            param.requires_grad = False
+        print("[+] Backbone and embedding layer frozen. Only the last layer (500 -> classes) stays trainable.")
+    else:
+        print("[+] Backbone frozen. Only fc stays trainable.")
 
 def train(
     model,
@@ -305,6 +316,7 @@ def train(
     stage=1,
     job_id="local",
     task_id="0",
+    scheduler=None,
 ):
     """Train with SupConLoss on embeddings + CrossEntropy on logits to train classifier head.
     ce_weight controls the blend: total_loss = (1 - ce_weight) * supcon + ce_weight * ce
@@ -378,6 +390,10 @@ def train(
         val_accuracy_epoch.append((val_pred == val_lbls).mean())
         val_loss_epoch.append(np.mean(val_loss_list))
         train_loss_epoch.append(np.mean(train_loss_batch))
+
+        # Learning-rate schedule (if any) advances once per epoch
+        if scheduler is not None:
+            scheduler.step()
         
         # Visualize embeddings every 5 epochs (or every epoch if you prefer)
         if (epoch + 1) % 5 == 0 or epoch == 0:
@@ -469,6 +485,18 @@ if __name__ == "__main__":
 					type=float,
 					help="Stage 1 loss = (1 - ce_weight) * SupCon + ce_weight * cross-entropy. "
 					     "0 trains stage 1 on SupCon only; accuracy is then meaningless until stage 2.")
+    parser.add_argument("--lr_drop_epoch",
+					default=0,
+					type=int,
+					help="Stage 1: multiply the learning rate by 0.1 after this many epochs. 0 = never (the original).")
+    parser.add_argument("--stage2_head_only",
+					action="store_true",
+					help="Stage 2 trains only the last layer (500 -> classes) and leaves the embedding layer "
+					     "frozen. Default: both FC layers train (the original).")
+    parser.add_argument("--stage2_lr",
+					default=None,
+					type=float,
+					help="Learning rate for stage 2. Default: learning_rate / 10 (the original).")
     # architecture (defaults are the original MicrogliaCNN)
     parser.add_argument("--kernel_size",
 					default=12,
@@ -517,6 +545,7 @@ if __name__ == "__main__":
         stride=args.stride,
         pool=args.pool,
         pool_size=args.pool_size,
+        num_classes=3,  # mice, rat, gyrified (see make_dataloaders)
     )
     print(f"[+] Model: {model.flattened_size:,} features after the convolutions, "
           f"{sum(p.numel() for p in model.parameters()):,} weights")
@@ -531,6 +560,16 @@ if __name__ == "__main__":
         lr=args.learning_rate,
         weight_decay=args.decay
     )
+
+    scheduler = None
+    if args.lr_drop_epoch > 0:
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[args.lr_drop_epoch], gamma=0.1)
+        print(f"[+] Learning rate drops to {args.learning_rate * 0.1:g} after stage 1 epoch {args.lr_drop_epoch}")
+
+    # Weights are saved per run, so array tasks do not overwrite each other
+    weights_dir = Path("weights")
+    weights_dir.mkdir(exist_ok=True)
+    run_name = f"job{job_id}_task{task_id}"
 
     # --- Stage 1: SupCon + CE, all layers trainable ---
     print(f"[+] Stage 1: Supervised contrastive learning ({args.stage1_epochs} epochs, ce_weight={args.ce_weight})")
@@ -548,17 +587,21 @@ if __name__ == "__main__":
         stage=1,
         job_id=job_id,
         task_id=task_id,
+        scheduler=scheduler,
     )
-    torch.save(model.state_dict(), "weights_stage1.pt")
-    print("[+] Stage 1 weights saved to weights_stage1.pt")
+    stage1_path = weights_dir / f"{run_name}_stage1.pt"
+    torch.save(model.state_dict(), stage1_path)
+    print(f"[+] Stage 1 weights saved to {stage1_path}")
 
     # --- Stage 2: Freeze backbone, fine-tune head ---
     print("[+] Stage 2: Fine-tuning classifier head")
-    freeze_backbone(model)
+    freeze_backbone(model, head_only=args.stage2_head_only)
 
+    stage2_lr = args.stage2_lr if args.stage2_lr is not None else args.learning_rate / 10
+    print(f"[+] Stage 2 learning rate: {stage2_lr:g}")
     optimizer_ft = torch.optim.Adam(
         filter(lambda p: p.requires_grad, model.parameters()),
-        lr=args.learning_rate / 10,
+        lr=stage2_lr,
         weight_decay=args.decay
     )
 
@@ -577,6 +620,10 @@ if __name__ == "__main__":
         job_id=job_id,
         task_id=task_id,
     )
+
+    final_path = weights_dir / f"{run_name}_final.pt"
+    torch.save(model.state_dict(), final_path)
+    print(f"[+] Final weights saved to {final_path}")
 
     # --- Final embeddings ---
     print("[+] Generating final embeddings")
