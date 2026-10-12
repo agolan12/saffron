@@ -81,6 +81,59 @@ class ConfigurableMicrogliaCNN(MicrogliaCNN):
         )
 
 
+class EqualizeHistogram(nn.Module):
+    """
+    Gives every image exactly the same brightness distribution, so brightness cannot
+    identify the class.
+
+    Step 1 (ranking): the pixels of one image are put in order from darkest to brightest,
+    and each pixel is replaced by its position in that order, scaled to 0..1.
+    Step 2 (target shape): the position is raised to `power`.
+        power=1  classic histogram equalisation: all brightness levels equally common.
+                 On these images that turns the dark background into bright blotches.
+        power=4  (default) most pixels stay dark and only the top positions are bright,
+                 like the original microscope images. The mean becomes 1 / (power + 1)
+                 = 0.2, about the average brightness of the dataset.
+
+    Ties: the files are 8-bit, so thousands of pixels share each value. If tied pixels
+    were given the same output, the sizes of those groups (which are the original
+    histogram) would still be readable from the result. So ties are split: first by the
+    average of the 5x5 neighbourhood (a pixel next to something bright ranks above one in
+    empty background), then by a fixed pseudo-random pattern. Every pixel gets its own
+    position, and every image ends up with the identical set of output values.
+
+    What it removes: how bright the image is and how its brightness is spread.
+    What it keeps: which pixels are brighter than which, so cell shape, texture and
+    background pattern are still there.
+
+    Nothing is fitted, and the same image always gives the same result.
+    """
+    def __init__(self, power=4.0):
+        super().__init__()
+        self.power = power
+        self._patterns = {}
+
+    def _pattern(self, n):
+        # one fixed shuffle of the pixel positions per image size, the same in every run
+        if n not in self._patterns:
+            self._patterns[n] = torch.randperm(n, generator=torch.Generator().manual_seed(0))
+        return self._patterns[n]
+
+    def forward(self, image):
+        height, width = image.shape[-2:]
+        flat = image.reshape(-1).to(torch.float32)
+        n = flat.numel()
+        neighbourhood = F.avg_pool2d(flat.reshape(1, 1, height, width), kernel_size=5, stride=1,
+                                     padding=2, count_include_pad=False).reshape(-1)
+        # Sort by the least important key first; later stable sorts keep earlier order within ties.
+        order = self._pattern(n)
+        order = order[torch.argsort(neighbourhood[order], stable=True)]
+        order = order[torch.argsort(flat[order], stable=True)]
+        rank = torch.empty(n)
+        rank[order] = (torch.arange(n, dtype=torch.float32) + 0.5) / n
+        return (rank ** self.power).reshape(image.shape).to(image.dtype)
+
+
 class MicrogliaEmbeddingWrapper(nn.Module):
     """Wraps MicrogliaCNN to return L2-normalized 500-d embeddings for SupConLoss (penultimate layer)."""
     def __init__(self, cnn):
@@ -128,10 +181,14 @@ def device_check(req_dev):
 	return device
 
 
-def make_dataloaders(batch_size=32):
+def make_dataloaders(batch_size=32, equalize=False):
+
+    # Optional first step for both training and validation, applied to the image as stored
+    # (before resizing and augmentation), so the brightness shortcut is removed at the source.
+    first_steps = [EqualizeHistogram()] if equalize else []
 
     # Training: random augmentation
-    train_transforms = v2.Compose([
+    train_transforms = v2.Compose(first_steps + [
         v2.Resize(size=(512, 512)),
         v2.RandomHorizontalFlip(p=0.5),
         v2.RandomVerticalFlip(p=0.5),
@@ -143,7 +200,7 @@ def make_dataloaders(batch_size=32):
         ])
 
     # Validation: same preprocessing, nothing random, so metrics and UMAPs are repeatable
-    val_transforms = v2.Compose([
+    val_transforms = v2.Compose(first_steps + [
         v2.Resize(size=(512, 512)),
         v2.Grayscale(num_output_channels=1),
         v2.ToDtype(torch.float32, scale=True),
@@ -485,6 +542,10 @@ if __name__ == "__main__":
 					type=float,
 					help="Stage 1 loss = (1 - ce_weight) * SupCon + ce_weight * cross-entropy. "
 					     "0 trains stage 1 on SupCon only; accuracy is then meaningless until stage 2.")
+    parser.add_argument("--equalize",
+					action="store_true",
+					help="Give every image the same brightness distribution first (see EqualizeHistogram), "
+					     "so the model cannot classify from brightness alone.")
     parser.add_argument("--lr_drop_epoch",
 					default=0,
 					type=int,
@@ -550,7 +611,7 @@ if __name__ == "__main__":
     print(f"[+] Model: {model.flattened_size:,} features after the convolutions, "
           f"{sum(p.numel() for p in model.parameters()):,} weights")
 
-    data_train, data_val, species_val = make_dataloaders(batch_size=args.batch_size)
+    data_train, data_val, species_val = make_dataloaders(batch_size=args.batch_size, equalize=args.equalize)
     embedding_model = MicrogliaEmbeddingWrapper(model)  # 500-d normalized embeddings for SupConLoss
     if SupConLoss is None:
         raise ImportError("Install pytorch-metric-learning for SupConLoss: pip install -e '.[torch]'")

@@ -96,6 +96,8 @@ def run_label(err_path):
                 if match:
                     parts.append(f"{short} {float(match.group(1)):g}")
             # options that only appear in the label when they differ from the original recipe
+            if re.search(r"equalize\s*=\s*True", text):
+                parts.append("equalized")
             if re.search(r"stage2_head_only\s*=\s*True", text):
                 parts.append("head only")
             match = re.search(r"lr_drop_epoch\s*=\s*(\d+)", text)

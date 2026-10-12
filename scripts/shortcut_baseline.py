@@ -28,6 +28,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from scipy.ndimage import uniform_filter
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix
 
@@ -43,9 +44,25 @@ BINS = 32
 PERCENTILES = [1, 5, 25, 50, 75, 95, 99, 99.9]
 
 
-def brightness_numbers(path):
+def equalize(image, power=4.0):
+    """
+    Same operation as EqualizeHistogram in supconloss_test_old.py: each pixel becomes
+    (its position in the dark-to-bright order, 0..1) ** power. Ties are split by the 5x5
+    neighbourhood average, then by a fixed pseudo-random pattern.
+    """
+    flat = image.ravel()
+    neighbourhood = uniform_filter(image, size=5, mode="nearest").ravel()
+    pattern = np.random.default_rng(0).random(flat.size)
+    order = np.lexsort((pattern, neighbourhood, flat))   # last key is the most important
+    rank = np.empty(flat.size)
+    rank[order] = (np.arange(flat.size) + 0.5) / flat.size
+    return rank ** power
+
+
+def brightness_numbers(path, equalized=False):
     """All the brightness-only numbers for one image: [mean, std, 32 histogram shares, 8 percentiles]."""
-    image = np.load(path).astype(np.float64).ravel()
+    image = np.load(path).astype(np.float64).squeeze()
+    image = equalize(image) if equalized else image.ravel()
     histogram = np.histogram(image, bins=BINS, range=(0.0, 1.0))[0] / image.size
     return np.concatenate([[image.mean(), image.std()], histogram, np.percentile(image, PERCENTILES)])
 
@@ -53,8 +70,15 @@ def brightness_numbers(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--data_dir", default=DEFAULT_DATA_DIR, help="folder that holds the species folders")
-    parser.add_argument("--out_txt", default="shortcut_baseline.txt", help="results text file to write")
+    parser.add_argument("--out_txt", default=None,
+                        help="results text file to write (default: shortcut_baseline.txt, or "
+                             "shortcut_baseline_equalized.txt with --equalize)")
+    parser.add_argument("--equalize", action="store_true",
+                        help="equalise each image's brightness distribution first, exactly as the training "
+                             "script does with --equalize. Shows how much of the brightness shortcut is left.")
     args = parser.parse_args()
+    if args.out_txt is None:
+        args.out_txt = "shortcut_baseline_equalized.txt" if args.equalize else "shortcut_baseline.txt"
 
     lines = []
 
@@ -67,7 +91,7 @@ def main():
     train_indices, val_indices = split_indices_by_image(dataset, val_split=0.2, seed=42)
 
     print(f"reading {len(dataset.samples)} images ...", flush=True)
-    features = np.stack([brightness_numbers(path) for path, _ in dataset.samples])
+    features = np.stack([brightness_numbers(path, args.equalize) for path, _ in dataset.samples])
     labels = np.array([label for _, label in dataset.samples])
     folders = np.array([Path(path).relative_to(dataset.data_dir).parts[0] for path, _ in dataset.samples])
 
@@ -75,7 +99,8 @@ def main():
     x_val, y_val = features[val_indices], labels[val_indices]
 
     out("=" * 70)
-    out("SHORTCUT TEST: classifying from brightness alone (no cell shape)")
+    out("SHORTCUT TEST: classifying from brightness alone (no cell shape)"
+        + ("   [images equalised first]" if args.equalize else ""))
     out("=" * 70)
     out(f"train images: {len(train_indices)}   validation images: {len(val_indices)}")
     majority = np.bincount(y_val).max() / len(y_val)
