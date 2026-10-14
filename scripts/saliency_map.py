@@ -2,6 +2,7 @@
 Saliency maps: which parts of an image does a trained model use for its decision?
 
 For a few validation images per class it draws three panels:
+    0. (only with --equalize or --li_threshold) the original image, before that preprocessing
     1. the image as the model sees it
     2. gradient map:  how much the decision changes when each single pixel changes
                       (fine detail; averaged over 20 slightly noised copies, "SmoothGrad")
@@ -118,6 +119,15 @@ def main():
         v2.Normalize(mean=[0.5], std=[0.5]),
     ])
     dataset = MicrogliaDataset(args.data_dir, labels=LABELS, merge_map=MERGE_MAP, transform=transform)
+    # With preprocessing, also load each image without it, to show next to what the model sees.
+    # Same folder and labels, so its samples are in the same order as `dataset`.
+    show_original = args.equalize or args.li_threshold
+    if show_original:
+        originals = MicrogliaDataset(args.data_dir, labels=LABELS, merge_map=MERGE_MAP, transform=v2.Compose([
+            v2.Resize(size=(512, 512)),
+            v2.Grayscale(num_output_channels=1),
+            v2.ToDtype(torch.float32, scale=True),
+        ]))
     _, val_indices = split_indices_by_image(dataset, val_split=0.2, seed=42)
 
     rng = np.random.default_rng(args.seed)
@@ -126,7 +136,8 @@ def main():
         of_class = [i for i in val_indices if dataset.samples[i][1] == class_index]
         chosen += list(rng.choice(of_class, size=min(args.per_class, len(of_class)), replace=False))
 
-    fig, axes = plt.subplots(len(chosen), 3, figsize=(10.5, 3.6 * len(chosen)), squeeze=False)
+    columns = 4 if show_original else 3
+    fig, axes = plt.subplots(len(chosen), columns, figsize=(3.5 * columns, 3.6 * len(chosen)), squeeze=False)
     print(f"\n{'true':<10}{'predicted':<11}{'confidence':>11}{'gradient on cells':>19}{'largest occlusion drop':>24}   file")
     shares = {label: [] for label in LABELS}
     for row, index in zip(axes, chosen):
@@ -150,9 +161,21 @@ def main():
         print(f"{LABELS[label]:<10}{LABELS[predicted]:<11}{probabilities[predicted].item():>11.2f}{on_cells:>19.2f}"
               f"{occlusion.max():>24.2f}   {species}/{path.name[:60]}")
 
-        row[0].imshow(shown, cmap="gray", vmin=0, vmax=1)
-        row[0].set_title(f"{species}: true {LABELS[label]}, predicted {LABELS[predicted]} "
-                         f"({probabilities[predicted].item():.2f})", fontsize=8, loc="left")
+        title = (f"{species}: true {LABELS[label]}, predicted {LABELS[predicted]} "
+                 f"({probabilities[predicted].item():.2f})")
+        if show_original:
+            # true brightness (no contrast stretch), so differences between species stay visible
+            original = originals[int(index)][0].squeeze(0).numpy()
+            row[0].imshow(original, cmap="gray", vmin=0, vmax=1)
+            row[0].set_title(f"{title}\noriginal", fontsize=8, loc="left")
+            row = row[1:]
+            steps_name = " + ".join(name for name, on in [("equalized", args.equalize),
+                                                           ("Li mask", args.li_threshold)] if on)
+            row[0].imshow(shown, cmap="gray", vmin=0, vmax=1)
+            row[0].set_title(f"model input ({steps_name})", fontsize=8, loc="left")
+        else:
+            row[0].imshow(shown, cmap="gray", vmin=0, vmax=1)
+            row[0].set_title(title, fontsize=8, loc="left")
         row[1].imshow(shown, cmap="gray", vmin=0, vmax=1)
         row[1].imshow(gradients, cmap="magma", alpha=0.75, vmax=np.quantile(gradients, 0.995))
         row[1].set_title(f"gradient map: {on_cells:.0%} on cell pixels (chance {chance:.0%})", fontsize=8, loc="left")
@@ -161,8 +184,8 @@ def main():
         row[2].imshow(occlusion, cmap="coolwarm", alpha=0.6, vmin=-limit, vmax=limit)
         row[2].set_title(f"occlusion: red = covering lowers confidence (max drop {occlusion.max():.2f})",
                          fontsize=8, loc="left")
-        for ax in row:
-            ax.axis("off")
+    for ax in axes.flat:
+        ax.axis("off")
 
     fig.tight_layout()
     fig.savefig(output, dpi=110)
