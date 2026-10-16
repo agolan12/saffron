@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from image_prep import li_mask, LI_BACKGROUND_SIGMA, LI_MIN_SIZE, LI_MAX_HOLE
 from saffron.io import data_io
-from saffron.data.datasets import MicrogliaDataset, generate_dataloaders
+from saffron.data.datasets import MicrogliaDataset, generate_dataloaders, load_image, IMAGE_SUFFIXES
 from saffron.data import data_processing
 from saffron.models.torch_models import MicrogliaCNN
 from saffron.models.loss_functions import SupConLoss
@@ -32,7 +32,10 @@ DEFAULT_DATA_DIR = "/gscratch/cheme/agolan/data/preprocessed_data"
 CLASS_SETS = {
     "all": (["mice", "rat", "gyrified"], {"human": "gyrified", "ferret": "gyrified", "pig": "gyrified"}),
     "rodent": (["mice", "rat"], {}),
+    # Injury conditions: folders HC, OGD and ROT holding already-processed TIFFs (use with --data_dir)
+    "condition": (["HC", "OGD", "ROT"], {}),
 }
+SPECIES = ["mice", "rat", "human", "ferret", "pig"]
 
 
 class ConfigurableMicrogliaCNN(MicrogliaCNN):
@@ -165,6 +168,18 @@ class LiThreshold(nn.Module):
         return torch.from_numpy(mask).reshape(image.shape).to(image.dtype)
 
 
+class Binarize(nn.Module):
+    """
+    For images that are already label masks (each cell stored as its own object number,
+    background 0): every pixel above 0 becomes 1 = cell, the rest 0 = background.
+
+    Without this the object numbers would be read as brightness, so a cell's gray level
+    would depend only on the order in which the segmentation numbered it.
+    """
+    def forward(self, image):
+        return (image > 0).to(image.dtype)
+
+
 class MicrogliaEmbeddingWrapper(nn.Module):
     """Wraps MicrogliaCNN to return L2-normalized 500-d embeddings for SupConLoss (penultimate layer)."""
     def __init__(self, cnn):
@@ -213,7 +228,7 @@ def device_check(req_dev):
 
 
 def make_dataloaders(batch_size=32, equalize=False, li_threshold=False, classes="all",
-                     data_dir=DEFAULT_DATA_DIR, li_settings=None):
+                     data_dir=DEFAULT_DATA_DIR, li_settings=None, binarize=False):
 
     # Optional first step for both training and validation, applied to the image as stored
     # (before resizing and augmentation), so the brightness shortcut is removed at the source.
@@ -222,6 +237,8 @@ def make_dataloaders(batch_size=32, equalize=False, li_threshold=False, classes=
         first_steps.append(EqualizeHistogram())
     if li_threshold:
         first_steps.append(LiThreshold(**(li_settings or {})))
+    if binarize:
+        first_steps.append(Binarize())
     labels, merge_map = CLASS_SETS[classes]
 
     # Training: random augmentation
@@ -255,25 +272,31 @@ def make_dataloaders(batch_size=32, equalize=False, li_threshold=False, classes=
     print(f"Path exists: {images_path.exists()}")
     print(f"Is directory: {images_path.is_dir()}")
     
-    # Check subdirectories
-    for label in ['mice', 'rat', 'ferret', 'human', 'pig']:
+    # Check the folders this run reads
+    for label in list(labels) + list(merge_map):
         subdir = images_path / label
         print(f"\n{label} directory:")
         print(f"  Path: {subdir}")
         print(f"  Exists: {subdir.exists()}")
         if subdir.exists():
-            npy_files = list(subdir.rglob("*.npy"))
-            print(f"  .npy files found: {len(npy_files)}")
-            if npy_files:
-                print(f"  Example files: {[f.name for f in npy_files[:3]]}")
+            image_files = [f for f in subdir.rglob("*")
+                           if f.suffix.lower() in IMAGE_SUFFIXES and not f.name.startswith("._")]
+            print(f"  Image files found (.npy/.tif/.tiff): {len(image_files)}")
+            if image_files:
+                print(f"  Example files: {[f.name for f in image_files[:3]]}")
+                example = load_image(image_files[0])
+                print(f"  First file as loaded: shape {example.shape}, "
+                      f"range {example.min():.3f}..{example.max():.3f}, mean {example.mean():.3f}")
     print(f"{'='*60}\n")
 
     microglia_dataset = MicrogliaDataset(images_path, labels=labels, merge_map=merge_map)
 
-    # Dataset with every species folder that is in use as its own class — used only for the species UMAP
-    species_labels = [name for name in ["mice", "rat", "human", "ferret", "pig"]
-                      if name in labels or name in merge_map]
-    species_dataset = MicrogliaDataset(images_path, labels=species_labels)
+    # Dataset with every species folder that is in use as its own class — used only for the species UMAP.
+    # Runs on non-species folders (--classes condition) have none, so that UMAP is skipped.
+    species_labels = [name for name in SPECIES if name in labels or name in merge_map]
+    species_val = None
+    if species_labels:
+        species_dataset = MicrogliaDataset(images_path, labels=species_labels)
 
     print(microglia_dataset.length)
 
@@ -282,10 +305,11 @@ def make_dataloaders(batch_size=32, equalize=False, li_threshold=False, classes=
         microglia_dataset, num_workers=2, batch_size=batch_size,
         train_transform=train_transforms, val_transform=val_transforms,
     )
-    _, species_val = generate_dataloaders(
-        species_dataset, num_workers=2, batch_size=batch_size,
-        train_transform=train_transforms, val_transform=val_transforms,
-    )
+    if species_labels:
+        _, species_val = generate_dataloaders(
+            species_dataset, num_workers=2, batch_size=batch_size,
+            train_transform=train_transforms, val_transform=val_transforms,
+        )
 
     return data_train, data_val, species_val
 
@@ -342,17 +366,22 @@ def visualize_embeddings(
         plt.close()
         print(f"[+] Saved {filepath}")
 
-    # UMAP 1: gyrified vs non-gyrified
+    # UMAP 1: the classes being trained on (dataloader.dataset is a TransformedSubset of a MicrogliaDataset)
+    class_names = dataloader.dataset.dataset.labels
+    palette = ["steelblue", "tomato", "gold", "mediumseagreen", "mediumpurple", "gray"]
     embs_merged, lbls_merged = collect_embeddings(dataloader)
     reduced_merged = run_umap(embs_merged)
     scatter(
         reduced_merged,
         lbls_merged,
-        label_names={0: "mice", 1: "rat", 2: "gyrified"},
-        colors={0: "steelblue", 1: "tomato", 2: "gold"},
-        title="UMAP — Gyrified vs Non-Gyrified",
+        label_names=dict(enumerate(class_names)),
+        colors={i: palette[i % len(palette)] for i in range(len(class_names))},
+        title="UMAP — " + " vs ".join(class_names),
         filepath=f"fig/umap_gyrified_job{job_id}_task{task_id}_epoch{epoch:03d}.png",
     )
+
+    if species_dataloader is None:
+        return                                         # no species folders in this run (--classes condition)
 
     # UMAP 2: all 5 species
     embs_species, lbls_species = collect_embeddings(species_dataloader)
@@ -579,7 +608,8 @@ if __name__ == "__main__":
     parser.add_argument("--classes",
 					default="all",
 					choices=sorted(CLASS_SETS),
-					help="all = mice, rat, gyrified (human + ferret + pig); rodent = mice and rat only.")
+					help="all = mice, rat, gyrified (human + ferret + pig); rodent = mice and rat only; "
+					     "condition = HC, OGD, ROT folders (point --data_dir at the folder that holds them).")
     parser.add_argument("--li_threshold",
 					action="store_true",
 					help="Turn every image into a black-and-white cell mask first: background removal, "
@@ -597,10 +627,15 @@ if __name__ == "__main__":
 					default=LI_MAX_HOLE,
 					type=int,
 					help="With --li_threshold: black holes smaller than this many pixels are filled.")
+    parser.add_argument("--binarize",
+					action="store_true",
+					help="For images that are already label masks (background 0, each cell its own number): "
+					     "every pixel above 0 becomes 1 = cell. Cannot be combined with --equalize or --li_threshold.")
     parser.add_argument("--data_dir",
 					default=DEFAULT_DATA_DIR,
 					type=str,
-					help="Folder that holds the species folders.")
+					help="Folder that holds the class folders (species folders, or HC/OGD/ROT). "
+					     "Files can be .npy or .tif/.tiff.")
     parser.add_argument("--equalize",
 					action="store_true",
 					help="Give every image the same brightness distribution first (see EqualizeHistogram), "
@@ -639,6 +674,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.equalize and args.li_threshold:
         parser.error("--equalize and --li_threshold cannot be combined: a mask has no brightness left to equalise")
+    if args.binarize and (args.equalize or args.li_threshold):
+        parser.error("--binarize is for images that are already masks; it cannot be combined with "
+                     "--equalize or --li_threshold")
 
     # Print all parameters to stdout (shows up in .out file)
     print("=" * 60)
@@ -674,7 +712,7 @@ if __name__ == "__main__":
 
     data_train, data_val, species_val = make_dataloaders(
         batch_size=args.batch_size, equalize=args.equalize, li_threshold=args.li_threshold,
-        classes=args.classes, data_dir=args.data_dir,
+        classes=args.classes, data_dir=args.data_dir, binarize=args.binarize,
         li_settings={"background_sigma": args.li_background_sigma, "min_size": args.li_min_size,
                      "max_hole": args.li_max_hole},
     )

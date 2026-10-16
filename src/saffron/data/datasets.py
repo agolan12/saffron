@@ -91,6 +91,33 @@ class PatchPairDataset(Dataset):
             'negative_patches': negative_patches
         }
 
+IMAGE_SUFFIXES = {".npy", ".tif", ".tiff"}
+
+
+def load_image(path):
+    """
+    Load one 2-D image as float32 in 0..1, with no other change to the pixels.
+
+    .npy files are returned as stored (they are already float 0..1).
+    TIFFs are divided by the largest value their integer type can hold
+    (255 for 8-bit, 65535 for 16-bit); float TIFFs are returned as stored.
+    """
+    path = Path(path)
+    if path.suffix.lower() == ".npy":
+        image = np.load(path)
+    else:
+        import tifffile
+        image = tifffile.imread(path)
+        if image.dtype == bool:
+            image = image.astype(np.float32)
+        elif np.issubdtype(image.dtype, np.integer):
+            image = image.astype(np.float32) / np.iinfo(image.dtype).max
+    image = np.squeeze(image)
+    if image.ndim != 2:
+        raise ValueError(f"{path}: expected a 2-D grayscale image, got shape {image.shape}")
+    return image.astype(np.float32, copy=False)
+
+
 class MicrogliaDataset(Dataset):
     """Supervised dataset for microglia classification."""
     
@@ -132,8 +159,10 @@ class MicrogliaDataset(Dataset):
                 print(f"Warning: Mapped label {logical_label!r} not in labels, skipping {label_dir}")
                 continue
             label_idx = self.label_to_idx[logical_label]
-            for filepath in label_dir.rglob("*.npy"):
-                self.samples.append((str(filepath), label_idx))
+            for filepath in sorted(label_dir.rglob("*")):
+                # .npy and TIFF; skips macOS "._" resource-fork files
+                if filepath.suffix.lower() in IMAGE_SUFFIXES and not filepath.name.startswith("._"):
+                    self.samples.append((str(filepath), label_idx))
         
         self.length = len(self.samples)
         print(f"Loaded {self.length} images from {data_dir}")
@@ -153,8 +182,7 @@ class MicrogliaDataset(Dataset):
     def __getitem__(self, idx):
         image_path, label = self.samples[idx]
         
-        # Load .npy file
-        image = np.load(image_path)  # Shape: (H, W), float32, already normalized
+        image = load_image(image_path)  # Shape: (H, W), float32, 0..1
         
         # Convert to tensor and add channel dimension
         image = torch.from_numpy(image).unsqueeze(0).float()  # (1, H, W)

@@ -99,6 +99,10 @@ def run_label(err_path):
             # options that only appear in the label when they differ from the original recipe
             if re.search(r"classes\s*=\s*rodent", text):
                 parts.append("mice vs rat")
+            if re.search(r"classes\s*=\s*condition", text):
+                parts.append("HC/OGD/ROT")
+            if re.search(r"binarize\s*=\s*True", text):
+                parts.append("binarized")
             if re.search(r"equalize\s*=\s*True", text):
                 parts.append("equalized")
             if re.search(r"li_threshold\s*=\s*True", text):

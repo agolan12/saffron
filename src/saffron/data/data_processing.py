@@ -19,16 +19,27 @@ def extract_base_name(filepath: str) -> str:
         'image_01_TL.npy' -> 'image_01'
         'image_01.npy' -> 'image_01'
         'data/image_01_BR.npy' -> 'image_01'
+        'image_01_bottom_right_top_right.tif' -> 'image_01'   (tiff_quadrant_split.py, run twice)
     """
     # Get filename without directory
     filename = Path(filepath).stem  # Removes .npy extension too
-    
-    # Remove quadrant suffix (_TL, _TR, _BL, _BR) if present
-    quadrant_suffixes = ['_TL', '_TR', '_BL', '_BR']
-    for suffix in quadrant_suffixes:
+
+    # Remove the quadrant suffix (_TL, _TR, _BL, _BR) if present
+    for suffix in ['_TL', '_TR', '_BL', '_BR']:
         if filename.endswith(suffix):
-            return filename[:-3]  # Remove last 3 characters
-    
+            return filename[:-len(suffix)]
+
+    # tiff_quadrant_split.py names quadrants _top_left etc.; images split more than once
+    # carry several of these, and all of them belong to the same original image
+    long_suffixes = ['_top_left', '_top_right', '_bottom_left', '_bottom_right']
+    stripped = True
+    while stripped:
+        stripped = False
+        for suffix in long_suffixes:
+            if filename.endswith(suffix):
+                filename = filename[:-len(suffix)]
+                stripped = True
+
     return filename
 
 
