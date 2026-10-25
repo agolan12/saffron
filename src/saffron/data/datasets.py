@@ -118,6 +118,16 @@ def load_image(path):
     return image.astype(np.float32, copy=False)
 
 
+def image_shape(path):
+    """Shape of an image file, read from its header without loading the pixels."""
+    path = Path(path)
+    if path.suffix.lower() == ".npy":
+        return tuple(np.load(path, mmap_mode="r").shape)
+    import tifffile
+    with tifffile.TiffFile(path) as tif:
+        return tuple(tif.pages[0].shape)
+
+
 class MicrogliaDataset(Dataset):
     """Supervised dataset for microglia classification."""
     

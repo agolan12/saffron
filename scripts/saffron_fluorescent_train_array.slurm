@@ -15,9 +15,11 @@
 # Submit from scripts/:
 #     sbatch saffron_fluorescent_train_array.slurm
 #
-# Each task first writes its preparation to $OUT_ROOT/<prep>/<condition>/*.npy with
-# export_fluorescent.py (skipped if that folder already exists; delete it to redo):
-# 1024 x 1024 images become four 512 x 512 pieces, kept on the same side of the split.
+# Each task first writes its preparation to $OUT_ROOT/<prep>_<PIECE>/<condition>/*.npy with
+# export_fluorescent.py (skipped if that folder already exists; delete it to redo): images are
+# cut into PIECE x PIECE pieces, all pieces of one image on the same side of the split, and the
+# CNN is trained at that size. With PIECE=256 a 1024 image gives 16 pieces and a 512 image 4.
+# Change PIECE below, or set it at submission: sbatch --export=ALL,PIECE=128 <this file>
 # Every setting except the preparation is shared, so the four runs compare directly.
 #
 # Weights: weights/job<jobid>_task<N>_final.pt, where N is the line of PREPS below.
@@ -26,6 +28,7 @@
 
 DATA_DIR=/gscratch/cheme/agolan/data/fluorescent_micro_images    # <-- folder holding the condition folders and li_thresh/
 OUT_ROOT=/gscratch/cheme/agolan/data/fluorescent_prepped
+PIECE=${PIECE:-256}                                                 # piece side in pixels: 512, 256 or 128
 
 echo 'sourcing bashrc'
 source ~/.bashrc
@@ -42,16 +45,17 @@ PREPS=(
     li_saved       # 3: the masks already in li_thresh/
 )
 PREP=${PREPS[$SLURM_ARRAY_TASK_ID]}
-PREP_DIR=$OUT_ROOT/$PREP
-echo "Prep: $PREP   data: $PREP_DIR"
+PREP_DIR=$OUT_ROOT/${PREP}_${PIECE}
+echo "Prep: $PREP   piece size: $PIECE   data: $PREP_DIR"
 
 if [ ! -d "$PREP_DIR" ]; then
-    python scripts/export_fluorescent.py "$DATA_DIR" --prep="$PREP" --out_dir="$PREP_DIR" || exit 1
+    python scripts/export_fluorescent.py "$DATA_DIR" --prep="$PREP" --piece_size="$PIECE" --out_dir="$PREP_DIR" || exit 1
 fi
 
 python scripts/supconloss_test_old.py \
     --classes=fluorescent \
     --data_dir="$PREP_DIR" \
+    --image_size="$PIECE" \
     --stage1_epochs=60 \
     --epochs=15 \
     --batch_size=128 \

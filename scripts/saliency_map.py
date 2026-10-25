@@ -95,6 +95,7 @@ def main():
     parser.add_argument("--stride", default=2, type=int)
     parser.add_argument("--pool", default="mixed", choices=["mixed", "avg", "max"])
     parser.add_argument("--pool_size", default=12, type=int)
+    parser.add_argument("--image_size", default=512, type=int, help="the --image_size value the run was trained with")
     args = parser.parse_args()
     output = args.output or f"saliency_{Path(args.weights).stem}.png"
     LABELS, MERGE_MAP = CLASS_SETS[args.classes]
@@ -104,7 +105,8 @@ def main():
     device = device_check(args.dev)
 
     model = ConfigurableMicrogliaCNN(kernel_size=args.kernel_size, stride=args.stride, pool=args.pool,
-                                     pool_size=args.pool_size, num_classes=len(LABELS))
+                                     pool_size=args.pool_size, input_size=args.image_size,
+                                     num_classes=len(LABELS))
     model.load_state_dict(torch.load(args.weights, map_location="cpu"))
     model.to(device).eval()
 
@@ -113,7 +115,7 @@ def main():
     if args.li_threshold:
         steps.append(LiThreshold(args.li_background_sigma, args.li_min_size, args.li_max_hole))
     transform = v2.Compose(steps + [
-        v2.Resize(size=(512, 512)),
+        v2.Resize(size=(args.image_size, args.image_size)),
         v2.Grayscale(num_output_channels=1),
         v2.ToDtype(torch.float32, scale=True),
         v2.Normalize(mean=[0.5], std=[0.5]),
@@ -124,7 +126,7 @@ def main():
     show_original = args.equalize or args.li_threshold
     if show_original:
         originals = MicrogliaDataset(args.data_dir, labels=LABELS, merge_map=MERGE_MAP, transform=v2.Compose([
-            v2.Resize(size=(512, 512)),
+            v2.Resize(size=(args.image_size, args.image_size)),
             v2.Grayscale(num_output_channels=1),
             v2.ToDtype(torch.float32, scale=True),
         ]))

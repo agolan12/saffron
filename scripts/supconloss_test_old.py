@@ -3,6 +3,7 @@ import argparse
 import logging
 import torch
 import sys
+from collections import Counter
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from image_prep import li_mask, LI_BACKGROUND_SIGMA, LI_MIN_SIZE, LI_MAX_HOLE
 from saffron.io import data_io
-from saffron.data.datasets import MicrogliaDataset, generate_dataloaders, load_image, IMAGE_SUFFIXES
+from saffron.data.datasets import MicrogliaDataset, generate_dataloaders, load_image, image_shape, IMAGE_SUFFIXES
 from saffron.data import data_processing
 from saffron.models.torch_models import MicrogliaCNN
 from saffron.models.loss_functions import SupConLoss
@@ -230,7 +231,7 @@ def device_check(req_dev):
 
 
 def make_dataloaders(batch_size=32, equalize=False, li_threshold=False, classes="all",
-                     data_dir=DEFAULT_DATA_DIR, li_settings=None, binarize=False):
+                     data_dir=DEFAULT_DATA_DIR, li_settings=None, binarize=False, image_size=512):
 
     # Optional first step for both training and validation, applied to the image as stored
     # (before resizing and augmentation), so the brightness shortcut is removed at the source.
@@ -245,7 +246,7 @@ def make_dataloaders(batch_size=32, equalize=False, li_threshold=False, classes=
 
     # Training: random augmentation
     train_transforms = v2.Compose(first_steps + [
-        v2.Resize(size=(512, 512)),
+        v2.Resize(size=(image_size, image_size)),
         v2.RandomHorizontalFlip(p=0.5),
         v2.RandomVerticalFlip(p=0.5),
         v2.RandomRotation(degrees=15),
@@ -257,7 +258,7 @@ def make_dataloaders(batch_size=32, equalize=False, li_threshold=False, classes=
 
     # Validation: same preprocessing, nothing random, so metrics and UMAPs are repeatable
     val_transforms = v2.Compose(first_steps + [
-        v2.Resize(size=(512, 512)),
+        v2.Resize(size=(image_size, image_size)),
         v2.Grayscale(num_output_channels=1),
         v2.ToDtype(torch.float32, scale=True),
         v2.Normalize(mean=[0.5], std=[0.5]),
@@ -275,6 +276,7 @@ def make_dataloaders(batch_size=32, equalize=False, li_threshold=False, classes=
     print(f"Is directory: {images_path.is_dir()}")
     
     # Check the folders this run reads
+    sizes_by_folder = {}
     for label in list(labels) + list(merge_map):
         subdir = images_path / label
         print(f"\n{label} directory:")
@@ -289,6 +291,15 @@ def make_dataloaders(batch_size=32, equalize=False, li_threshold=False, classes=
                 example = load_image(image_files[0])
                 print(f"  First file as loaded: shape {example.shape}, "
                       f"range {example.min():.3f}..{example.max():.3f}, mean {example.mean():.3f}")
+                sizes = Counter(image_shape(f)[-2:] for f in image_files)
+                sizes_by_folder[label] = sizes
+                print(f"  Image sizes: " + ", ".join(f"{h}x{w}: {n}" for (h, w), n in sorted(sizes.items())))
+    # Every image is resized to image_size, so files of different sizes end up with cells at
+    # different scales. If the mix differs between folders, size alone can identify the class.
+    if len({frozenset(sizes) for sizes in sizes_by_folder.values()}) > 1:
+        print("\n  WARNING: the folders do not hold the same image sizes. Each image is resized to "
+              f"{image_size}x{image_size}, so cell size and edge blur differ by folder and can identify "
+              "the class. Bring every file to one size first (scripts/match_image_size.py).")
     print(f"{'='*60}\n")
 
     microglia_dataset = MicrogliaDataset(images_path, labels=labels, merge_map=merge_map)
@@ -629,6 +640,11 @@ if __name__ == "__main__":
 					default=LI_MAX_HOLE,
 					type=int,
 					help="With --li_threshold: black holes smaller than this many pixels are filled.")
+    parser.add_argument("--image_size",
+					default=512,
+					type=int,
+					help="Every image is resized to image_size x image_size before the CNN. Set it to the size "
+					     "the files already have to skip resizing (e.g. 128 for 128x128 files).")
     parser.add_argument("--binarize",
 					action="store_true",
 					help="For images that are already label masks (background 0, each cell its own number): "
@@ -707,6 +723,7 @@ if __name__ == "__main__":
         stride=args.stride,
         pool=args.pool,
         pool_size=args.pool_size,
+        input_size=args.image_size,
         num_classes=len(CLASS_SETS[args.classes][0]),
     )
     print(f"[+] Model: {model.flattened_size:,} features after the convolutions, "
@@ -714,7 +731,7 @@ if __name__ == "__main__":
 
     data_train, data_val, species_val = make_dataloaders(
         batch_size=args.batch_size, equalize=args.equalize, li_threshold=args.li_threshold,
-        classes=args.classes, data_dir=args.data_dir, binarize=args.binarize,
+        classes=args.classes, data_dir=args.data_dir, binarize=args.binarize, image_size=args.image_size,
         li_settings={"background_sigma": args.li_background_sigma, "min_size": args.li_min_size,
                      "max_hole": args.li_max_hole},
     )
