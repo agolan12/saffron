@@ -34,6 +34,8 @@ CLASS_SETS = {
     "rodent": (["mice", "rat"], {}),
     # Injury conditions: folders HC, OGD and ROT holding already-processed TIFFs (use with --data_dir)
     "condition": (["HC", "OGD", "ROT"], {}),
+    # fluorescent_micro_images conditions, as written by export_fluorescent.py (use with --data_dir)
+    "fluorescent": (["nt_control", "ogd_0.5", "ogd_1.5", "ogd_3", "ogd_azo_1.5", "ogd_sod_3"], {}),
 }
 SPECIES = ["mice", "rat", "human", "ferret", "pig"]
 
