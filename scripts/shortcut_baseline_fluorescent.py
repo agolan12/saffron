@@ -64,7 +64,7 @@ FLUORESCENT_CLASS_SETS = {
     "fluorescent": (["nt_control", "ogd_0.5", "ogd_1.5", "ogd_3", "ogd_azo_1.5", "ogd_sod_3"], {}),
     # OGD (all three durations, no drug) vs untreated control; the drug folders are left out
     "fluorescent_ogd_vs_control": (["nt_control", "ogd"], {"ogd_0.5": "ogd", "ogd_1.5": "ogd", "ogd_3": "ogd"}),
-    "fluorescent_ogd3_vs_control": (["nt_control", "ogd_3"], {}),
+    "fluorescent_ogd_3_vs_control": (["nt_control", "ogd_3"], {}),
 }
 
 

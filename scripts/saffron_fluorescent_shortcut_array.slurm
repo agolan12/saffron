@@ -18,7 +18,7 @@
 # When all six have finished, compare the "balanced" column across them:
 #     grep -A4 "^version" shortcut_fluorescent/*.txt
 
-DATA_DIR=/gscratch/cheme/agolan/data/fluorescent_micro_images    # <-- folder holding the condition folders and li_thresh/
+DATA_DIR=${DATA_DIR:-/gscratch/cheme/agolan/data/fluorescent_microglia_images}    # <-- folder holding the condition folders and li_thresh/
 
 echo 'sourcing bashrc'
 source ~/.bashrc
@@ -41,7 +41,7 @@ PREP=${PREPS[$SLURM_ARRAY_TASK_ID]}
 #     sbatch --export=ALL,REVIEW_CSV=/gscratch/cheme/agolan/saffron/fluorescent_review.csv <this file>
 REVIEW_CSV=${REVIEW_CSV:-}
 # Class set, as in the training slurm (default: every folder its own class):
-#     sbatch --export=ALL,CLASSES=fluorescent_ogd3_vs_control <this file>
+#     sbatch --export=ALL,CLASSES=fluorescent_ogd_3_vs_control <this file>
 CLASSES=${CLASSES:-}
 EXTRA_ARGS=()
 [ -n "$CLASSES" ] && EXTRA_ARGS+=(--classes="$CLASSES")

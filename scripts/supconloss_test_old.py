@@ -37,7 +37,7 @@ CLASS_SETS = {
     # Injury conditions: folders HC, OGD and ROT holding already-processed TIFFs (use with --data_dir)
     "condition": (["HC", "OGD", "ROT"], {}),
     # fluorescent_micro_images conditions, as written by export_fluorescent.py (use with --data_dir):
-    # fluorescent (all six folders), fluorescent_ogd_vs_control, fluorescent_ogd3_vs_control.
+    # fluorescent (all six folders), fluorescent_ogd_vs_control, fluorescent_ogd_3_vs_control.
     # Defined in shortcut_baseline_fluorescent.py so the brightness-only test uses the same classes.
     **FLUORESCENT_CLASS_SETS,
 }

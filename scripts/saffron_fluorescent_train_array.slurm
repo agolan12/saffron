@@ -26,7 +26,7 @@
 # Summary when all four have finished:
 #     python plot_runs.py logs_error/fluor_train_<jobid>_*.err -o fluor_train_<jobid>.png
 
-DATA_DIR=/gscratch/cheme/agolan/data/fluorescent_micro_images    # <-- folder holding the condition folders and li_thresh/
+DATA_DIR=${DATA_DIR:-/gscratch/cheme/agolan/data/fluorescent_microglia_images}    # <-- folder holding the condition folders and li_thresh/
 OUT_ROOT=/gscratch/cheme/agolan/data/fluorescent_prepped
 PIECE=${PIECE:-256}                                                 # piece side in pixels: 512, 256 or 128
 # Clean images only: set REVIEW_CSV to the review_images.py labels (copy fluorescent_review.csv to
@@ -34,8 +34,8 @@ PIECE=${PIECE:-256}                                                 # piece side
 #     sbatch --export=ALL,REVIEW_CSV=/gscratch/cheme/agolan/saffron/fluorescent_review.csv <this file>
 REVIEW_CSV=${REVIEW_CSV:-}
 # Class set and run settings; set any of them at submission, e.g.
-#     sbatch --export=ALL,CLASSES=fluorescent_ogd3_vs_control,CE=0.3,STAGE1=200,EPOCHS=50 <this file>
-# CLASSES: fluorescent (all six), fluorescent_ogd_vs_control, fluorescent_ogd3_vs_control
+#     sbatch --export=ALL,CLASSES=fluorescent_ogd_3_vs_control,CE=0.3,STAGE1=200,EPOCHS=50 <this file>
+# CLASSES: fluorescent (all six), fluorescent_ogd_vs_control, fluorescent_ogd_3_vs_control
 CLASSES=${CLASSES:-fluorescent}
 CE=${CE:-0.5}               # --ce_weight
 LR=${LR:-0.0003}            # --learning_rate

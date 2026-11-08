@@ -125,7 +125,7 @@ def run_shortcut(monkeypatch, data_dir, out_dir, *extra):
 
 @pytest.mark.parametrize("classes, folders_read, class_line", [
     ("fluorescent_ogd_vs_control", 4, "nt_control = nt_control; ogd = ogd_0.5 + ogd_1.5 + ogd_3"),
-    ("fluorescent_ogd3_vs_control", 2, "nt_control = nt_control; ogd_3 = ogd_3"),
+    ("fluorescent_ogd_3_vs_control", 2, "nt_control = nt_control; ogd_3 = ogd_3"),
 ])
 def test_shortcut_class_sets_read_only_their_folders(monkeypatch, six_folders, tmp_path, capsys,
                                                     classes, folders_read, class_line):
@@ -148,9 +148,9 @@ def test_shortcut_class_set_missing_folder_stops(monkeypatch, six_folders, tmp_p
 def test_shortcut_with_class_set_and_review_csv(monkeypatch, six_folders, tmp_path):
     write_csv(tmp_path / "review.csv", [(f"{c}/{c}_{i}.tif", "bad" if i == 0 else "good")
                                         for c in ALL_SIX for i in range(5)])
-    run_shortcut(monkeypatch, six_folders, tmp_path / "out", "--classes", "fluorescent_ogd3_vs_control",
+    run_shortcut(monkeypatch, six_folders, tmp_path / "out", "--classes", "fluorescent_ogd_3_vs_control",
                  "--review_csv", str(tmp_path / "review.csv"))
-    text = (tmp_path / "out" / "shortcut_fluorescent_raw_fluorescent_ogd3_vs_control_good.txt").read_text()
+    text = (tmp_path / "out" / "shortcut_fluorescent_raw_fluorescent_ogd_3_vs_control_good.txt").read_text()
     assert "left out: 2 bad" in text                            # one per folder read, azo/sod not counted
 
 
@@ -163,7 +163,7 @@ def test_training_dataset_uses_the_same_class_sets(six_folders):
         read = {Path(path).parent.name: labels[label] for path, label in dataset.samples}
         if name == "fluorescent_ogd_vs_control":
             assert read == {"nt_control": "nt_control", "ogd_0.5": "ogd", "ogd_1.5": "ogd", "ogd_3": "ogd"}
-        elif name == "fluorescent_ogd3_vs_control":
+        elif name == "fluorescent_ogd_3_vs_control":
             assert read == {"nt_control": "nt_control", "ogd_3": "ogd_3"}
         else:
             assert read == {c: c for c in ALL_SIX}
