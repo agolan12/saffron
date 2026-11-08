@@ -27,10 +27,15 @@ For the masks the only brightness left is the share of the image marked as cell.
 Usage (on Hyak, from the saffron folder; CPU only):
     python scripts/shortcut_baseline_fluorescent.py /path/to/fluorescent_micro_images --prep li_raw
 Writes <out_dir>/shortcut_fluorescent_<prep>.txt (the same text that is printed).
+
+Clean images only: --review_csv fluorescent_review.csv keeps only the images labelled "good" there
+(--keep good unsure to keep both); images missing from the CSV are left out too. The result
+then goes to shortcut_fluorescent_<prep>_good.txt.
 """
 
 import argparse
 import sys
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -51,6 +56,16 @@ BINS = 32                                        # same numbers as shortcut_base
 PERCENTILES = [1, 5, 25, 50, 75, 95, 99, 99.9]
 LOW_PERCENTILE, HIGH_PERCENTILE = 1, 99.5        # same stretch as li_panels.py
 MAX_SIDE = 1024
+
+# Class sets for this data set: name -> (class names in label order, folder -> class it is merged
+# into). Only the folders named here are read. supconloss_test_old.py imports these for --classes,
+# so the CNN and this shortcut test use the same classes.
+FLUORESCENT_CLASS_SETS = {
+    "fluorescent": (["nt_control", "ogd_0.5", "ogd_1.5", "ogd_3", "ogd_azo_1.5", "ogd_sod_3"], {}),
+    # OGD (all three durations, no drug) vs untreated control; the drug folders are left out
+    "fluorescent_ogd_vs_control": (["nt_control", "ogd"], {"ogd_0.5": "ogd", "ogd_1.5": "ogd", "ogd_3": "ogd"}),
+    "fluorescent_ogd3_vs_control": (["nt_control", "ogd_3"], {}),
+}
 
 
 def normalise(image):
@@ -81,6 +96,33 @@ def prepare(path, prep, channel, mask_dir):
     raise ValueError(prep)
 
 
+def load_review(csv_path):
+    """{'<condition>/<name>.tif': label} from a review_images.py CSV (file paths relative to data_dir).
+
+    The header row may be anywhere: a CSV re-sorted in a spreadsheet has it among the data rows."""
+    import csv
+    with open(csv_path, newline="") as f:
+        rows = [row for row in csv.reader(f) if row]
+    header = next((row for row in rows if "file" in row and "label" in row), None)
+    if header is None:
+        raise SystemExit(f"{csv_path}: no header row with 'file' and 'label' columns")
+    file_col, label_col = header.index("file"), header.index("label")
+    return {row[file_col]: row[label_col] for row in rows if row is not header}
+
+
+def review_label(review, path):
+    """The review label of an image at <data_dir>/<condition>/<name>.tif, or 'not reviewed'."""
+    return review.get(f"{path.parent.name}/{path.name}", "not reviewed")
+
+
+def check_review_matches(review, data_dir, conditions):
+    """Stop if no image under data_dir is in the review CSV (wrong CSV or wrong data_dir)."""
+    on_disk = {f"{c}/{p.name}" for c in conditions for p in (data_dir / c).glob("*.tif")}
+    if review and not on_disk & review.keys():
+        raise SystemExit(f"none of the {len(review)} files in the review CSV are under {data_dir}: "
+                         "is it the CSV for this data set?")
+
+
 def brightness_numbers(image, top):
     """[mean, std, 32 histogram shares over 0..top, 8 percentiles], as in shortcut_baseline.py."""
     image = image.ravel()
@@ -94,6 +136,12 @@ def main():
     parser.add_argument("--prep", required=True, choices=PREPS, help="image preparation, see above")
     parser.add_argument("--channel", default=1, type=int, help="channel to use: 1 = Iba1 (microglia), the default")
     parser.add_argument("--out_dir", default="shortcut_fluorescent", help="folder for the results text file")
+    parser.add_argument("--review_csv", help="review_images.py labels; only images labelled --keep are used")
+    parser.add_argument("--keep", nargs="+", default=["good"],
+                        help="review labels to keep with --review_csv (default: good)")
+    parser.add_argument("--classes", choices=sorted(FLUORESCENT_CLASS_SETS),
+                        help="class set, as --classes in supconloss_test_old.py "
+                             "(default: every folder is its own class)")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -102,12 +150,29 @@ def main():
     mask_dir = data_dir / "li_thresh"
     conditions = sorted(p.name for p in data_dir.iterdir()
                         if p.is_dir() and p.name != "li_thresh" and not p.name.startswith("."))
+    # conditions: the folders read; class_names: the classes they are sorted into
+    if args.classes:
+        class_names, merge_map = FLUORESCENT_CLASS_SETS[args.classes]
+        wanted = [name for name in class_names if name not in merge_map.values()] + list(merge_map)
+        missing = [name for name in wanted if name not in conditions]
+        if missing:
+            raise SystemExit(f"--classes {args.classes} needs folders that are not in {data_dir}: {missing}")
+        conditions = sorted(wanted)
+    else:
+        class_names, merge_map = conditions, {}
+    review = load_review(args.review_csv) if args.review_csv else None
+    if review is not None:
+        check_review_matches(review, data_dir, conditions)
 
     # Same files for every prep (li_saved then drops the ones with no mask)
-    samples, too_large = [], 0
-    for label, condition in enumerate(conditions):
+    samples, too_large, dropped = [], 0, Counter()
+    for condition in conditions:
+        label = class_names.index(merge_map.get(condition, condition))
         for path in sorted((data_dir / condition).glob("*.tif")):
             if path.name.startswith("."):
+                continue
+            if review is not None and review_label(review, path) not in args.keep:
+                dropped[review_label(review, path)] += 1
                 continue
             with tifffile.TiffFile(path) as tif:       # header only: skip the tile scan without loading it
                 if max(tif.series[0].shape[-2:]) > MAX_SIDE:
@@ -148,13 +213,19 @@ def main():
     out("=" * 70)
     out(f"data: {data_dir}")
     out(f"conditions: {', '.join(conditions)}")
+    if args.classes:
+        out(f"class set {args.classes}: " + "; ".join(
+            f"{name} = {' + '.join(c for c in conditions if merge_map.get(c, c) == name)}" for name in class_names))
     out(f"skipped as larger than {MAX_SIDE} px: {too_large}" + (f"   no saved mask: {no_mask}" if args.prep == "li_saved" else ""))
+    if review is not None:
+        out(f"review filter: {args.review_csv}, kept {'/'.join(args.keep)}; left out: "
+            + (", ".join(f"{n} {label}" for label, n in sorted(dropped.items())) or "none"))
     out(f"train images: {len(train_indices)}   validation images: {len(val_indices)}")
     out(f"always guessing the largest class: accuracy {np.bincount(y_val).max() / len(y_val):.3f}")
 
     versions = [("mean", slice(0, 1)), ("mean + spread", slice(0, 2)), ("histogram", slice(2, None))]
     out(f"\n{'version':<16}{'numbers':>8}{'accuracy':>10}{'balanced':>10}   recall per class: "
-        + "  ".join(conditions))
+        + "  ".join(class_names))
     predictions = {}
     for name, columns in versions:
         print(f"training '{name}' ...", flush=True)
@@ -165,17 +236,17 @@ def main():
         predicted = model.predict(x_val[:, columns])
         predictions[name] = predicted
         recall = [np.mean(predicted[y_val == c] == c) if np.any(y_val == c) else np.nan
-                  for c in range(len(conditions))]
+                  for c in range(len(class_names))]
         out(f"{name:<16}{x_train[:, columns].shape[1]:>8}{np.mean(predicted == y_val):>10.3f}"
             f"{balanced_accuracy_score(y_val, predicted):>10.3f}   "
-            + "  ".join(f"{r:>{max(len(c), 5)}.3f}" for r, c in zip(recall, conditions)))
-    out(f"\n'balanced' is the average of the per-class recalls; pure guessing gives {1 / len(conditions):.3f}.")
+            + "  ".join(f"{r:>{max(len(c), 5)}.3f}" for r, c in zip(recall, class_names)))
+    out(f"\n'balanced' is the average of the per-class recalls; pure guessing gives {1 / len(class_names):.3f}.")
 
     out("\nConfusion matrix, histogram version (rows = true class, columns = predicted class)")
-    matrix = confusion_matrix(y_val, predictions["histogram"], labels=range(len(conditions)))
-    width = max(10, max(len(c) for c in conditions) + 2)
-    out(f"{'':<{width}}" + "".join(f"{c:>{width}}" for c in conditions))
-    for condition, row in zip(conditions, matrix):
+    matrix = confusion_matrix(y_val, predictions["histogram"], labels=range(len(class_names)))
+    width = max(10, max(len(c) for c in class_names + conditions) + 2)
+    out(f"{'':<{width}}" + "".join(f"{c:>{width}}" for c in class_names))
+    for condition, row in zip(class_names, matrix):
         out(f"{condition:<{width}}" + "".join(f"{n:>{width}}" for n in row))
 
     out("\nAverage value per condition (all images; for masks, the share of pixels marked as cell)")
@@ -185,7 +256,9 @@ def main():
             out(f"  {condition:<{width}}{len(means):>5} images   mean {means.mean():.4f}   middle half "
                 f"{np.percentile(means, 25):.4f} to {np.percentile(means, 75):.4f}")
 
-    out_txt = Path(args.out_dir) / f"shortcut_fluorescent_{args.prep}.txt"
+    suffix = f"_{args.classes}" if args.classes else ""
+    suffix += f"_{'+'.join(args.keep)}" if review is not None else ""   # don't overwrite the all-images result
+    out_txt = Path(args.out_dir) / f"shortcut_fluorescent_{args.prep}{suffix}.txt"
     out_txt.parent.mkdir(parents=True, exist_ok=True)
     out_txt.write_text("\n".join(lines) + "\n")
     print(f"\nwrote {out_txt}")

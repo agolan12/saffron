@@ -14,6 +14,7 @@ import umap
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from image_prep import li_mask, LI_BACKGROUND_SIGMA, LI_MIN_SIZE, LI_MAX_HOLE
+from shortcut_baseline_fluorescent import FLUORESCENT_CLASS_SETS
 from saffron.io import data_io
 from saffron.data.datasets import MicrogliaDataset, generate_dataloaders, load_image, image_shape, IMAGE_SUFFIXES
 from saffron.data import data_processing
@@ -35,8 +36,10 @@ CLASS_SETS = {
     "rodent": (["mice", "rat"], {}),
     # Injury conditions: folders HC, OGD and ROT holding already-processed TIFFs (use with --data_dir)
     "condition": (["HC", "OGD", "ROT"], {}),
-    # fluorescent_micro_images conditions, as written by export_fluorescent.py (use with --data_dir)
-    "fluorescent": (["nt_control", "ogd_0.5", "ogd_1.5", "ogd_3", "ogd_azo_1.5", "ogd_sod_3"], {}),
+    # fluorescent_micro_images conditions, as written by export_fluorescent.py (use with --data_dir):
+    # fluorescent (all six folders), fluorescent_ogd_vs_control, fluorescent_ogd3_vs_control.
+    # Defined in shortcut_baseline_fluorescent.py so the brightness-only test uses the same classes.
+    **FLUORESCENT_CLASS_SETS,
 }
 SPECIES = ["mice", "rat", "human", "ferret", "pig"]
 
@@ -622,7 +625,9 @@ if __name__ == "__main__":
 					default="all",
 					choices=sorted(CLASS_SETS),
 					help="all = mice, rat, gyrified (human + ferret + pig); rodent = mice and rat only; "
-					     "condition = HC, OGD, ROT folders (point --data_dir at the folder that holds them).")
+					     "condition = HC, OGD, ROT folders (point --data_dir at the folder that holds them); "
+					     "fluorescent* = export_fluorescent.py folders: all six conditions, OGD 0.5/1.5/3 merged "
+					     "vs nt_control, or ogd_3 vs nt_control.")
     parser.add_argument("--li_threshold",
 					action="store_true",
 					help="Turn every image into a black-and-white cell mask first: background removal, "

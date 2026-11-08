@@ -37,6 +37,18 @@ PREPS=(
     li_saved       # 5: the masks already in li_thresh/
 )
 PREP=${PREPS[$SLURM_ARRAY_TASK_ID]}
-echo "Prep: $PREP"
+# Clean images only (writes shortcut_fluorescent_<prep>_good.txt):
+#     sbatch --export=ALL,REVIEW_CSV=/gscratch/cheme/agolan/saffron/fluorescent_review.csv <this file>
+REVIEW_CSV=${REVIEW_CSV:-}
+# Class set, as in the training slurm (default: every folder its own class):
+#     sbatch --export=ALL,CLASSES=fluorescent_ogd3_vs_control <this file>
+CLASSES=${CLASSES:-}
+EXTRA_ARGS=()
+[ -n "$CLASSES" ] && EXTRA_ARGS+=(--classes="$CLASSES")
+if [ -n "$REVIEW_CSV" ]; then
+    [ -f "$REVIEW_CSV" ] || { echo "REVIEW_CSV not found: $REVIEW_CSV"; exit 1; }
+    EXTRA_ARGS+=(--review_csv="$REVIEW_CSV" --keep good)
+fi
+echo "Prep: $PREP   classes: ${CLASSES:-every folder}   review filter: ${REVIEW_CSV:-none (all images)}"
 
-python scripts/shortcut_baseline_fluorescent.py "$DATA_DIR" --prep="$PREP"
+python scripts/shortcut_baseline_fluorescent.py "$DATA_DIR" --prep="$PREP" "${EXTRA_ARGS[@]}"

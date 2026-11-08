@@ -18,6 +18,10 @@ Usage (on Hyak, from the saffron folder; CPU, a few minutes):
     python scripts/export_fluorescent.py /path/to/fluorescent_micro_images --prep li_raw \
         --piece_size 256 --out_dir /gscratch/cheme/agolan/data/fluorescent_prepped/li_raw_256
 Train on the result with --image_size equal to --piece_size.
+
+Clean images only: add --review_csv fluorescent_review.csv to write only the images labelled
+"good" there (--keep good unsure to keep both). Images missing from the CSV are left out too.
+Use a separate --out_dir for this, so the all-images export is not mixed with it.
 """
 
 import argparse
@@ -27,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
-from shortcut_baseline_fluorescent import PREPS, MAX_SIDE, prepare
+from shortcut_baseline_fluorescent import PREPS, MAX_SIDE, prepare, load_review, review_label, check_review_matches
 
 QUADRANTS = {"top_left": (0, 0), "top_right": (0, 1), "bottom_left": (1, 0), "bottom_right": (1, 1)}
 
@@ -61,6 +65,9 @@ def main():
     parser.add_argument("--piece_size", default=512, type=int,
                         help="side of the pieces in pixels (512, 256, 128, ...); train with the same --image_size")
     parser.add_argument("--channel", default=1, type=int, help="channel to use: 1 = Iba1 (microglia), the default")
+    parser.add_argument("--review_csv", help="review_images.py labels; only images labelled --keep are written")
+    parser.add_argument("--keep", nargs="+", default=["good"],
+                        help="review labels to keep with --review_csv (default: good)")
     args = parser.parse_args()
 
     data_dir, out_dir = Path(args.data_dir), Path(args.out_dir)
@@ -68,12 +75,19 @@ def main():
         raise SystemExit(f"not a folder: {data_dir}")
     conditions = sorted(p.name for p in data_dir.iterdir()
                         if p.is_dir() and p.name != "li_thresh" and not p.name.startswith("."))
+    review = load_review(args.review_csv) if args.review_csv else None
+    if review is not None:
+        check_review_matches(review, data_dir, conditions)
+        print(f"review filter: {args.review_csv}, keeping only images labelled {'/'.join(args.keep)}")
 
     for condition in conditions:
         (out_dir / condition).mkdir(parents=True, exist_ok=True)
-        sizes, written, whole, too_large, no_mask = Counter(), 0, 0, 0, 0
+        sizes, written, whole, too_large, no_mask, dropped = Counter(), 0, 0, 0, 0, Counter()
         for path in sorted((data_dir / condition).glob("*.tif")):
             if path.name.startswith("."):
+                continue
+            if review is not None and review_label(review, path) not in args.keep:
+                dropped[review_label(review, path)] += 1
                 continue
             with tifffile.TiffFile(path) as tif:       # header only: skip the tile scan without loading it
                 if max(tif.series[0].shape[-2:]) > MAX_SIDE:
@@ -95,7 +109,8 @@ def main():
                 whole += 1
         size_text = ", ".join(f"{h}x{w}: {n}" for (h, w), n in sorted(sizes.items()))
         print(f"{condition:<14} {sum(sizes.values()):>4} images ({size_text}) -> {written} files"
-              f"   ({whole} written whole)   skipped: {too_large} too large" + (f", {no_mask} no saved mask" if args.prep == "li_saved" else ""))
+              f"   ({whole} written whole)   skipped: {too_large} too large" + (f", {no_mask} no saved mask" if args.prep == "li_saved" else "")
+              + "".join(f", {n} {label}" for label, n in sorted(dropped.items())))
 
     print(f"\nwrote {args.prep} to {out_dir}/")
 

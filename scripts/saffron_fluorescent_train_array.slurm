@@ -29,6 +29,18 @@
 DATA_DIR=/gscratch/cheme/agolan/data/fluorescent_micro_images    # <-- folder holding the condition folders and li_thresh/
 OUT_ROOT=/gscratch/cheme/agolan/data/fluorescent_prepped
 PIECE=${PIECE:-256}                                                 # piece side in pixels: 512, 256 or 128
+# Clean images only: set REVIEW_CSV to the review_images.py labels (copy fluorescent_review.csv to
+# Hyak first; it is gitignored). Only "good" images are exported, to <prep>_<PIECE>_good/:
+#     sbatch --export=ALL,REVIEW_CSV=/gscratch/cheme/agolan/saffron/fluorescent_review.csv <this file>
+REVIEW_CSV=${REVIEW_CSV:-}
+# Class set and run settings; set any of them at submission, e.g.
+#     sbatch --export=ALL,CLASSES=fluorescent_ogd3_vs_control,CE=0.3,STAGE1=200,EPOCHS=50 <this file>
+# CLASSES: fluorescent (all six), fluorescent_ogd_vs_control, fluorescent_ogd3_vs_control
+CLASSES=${CLASSES:-fluorescent}
+CE=${CE:-0.5}               # --ce_weight
+LR=${LR:-0.0003}            # --learning_rate
+STAGE1=${STAGE1:-60}        # --stage1_epochs
+EPOCHS=${EPOCHS:-15}        # --epochs (stage 2)
 
 echo 'sourcing bashrc'
 source ~/.bashrc
@@ -46,17 +58,26 @@ PREPS=(
 )
 PREP=${PREPS[$SLURM_ARRAY_TASK_ID]}
 PREP_DIR=$OUT_ROOT/${PREP}_${PIECE}
-echo "Prep: $PREP   piece size: $PIECE   data: $PREP_DIR"
+REVIEW_ARGS=()
+if [ -n "$REVIEW_CSV" ]; then
+    [ -f "$REVIEW_CSV" ] || { echo "REVIEW_CSV not found: $REVIEW_CSV"; exit 1; }
+    PREP_DIR=${PREP_DIR}_good
+    REVIEW_ARGS=(--review_csv="$REVIEW_CSV" --keep good)
+fi
+echo "Prep: $PREP   piece size: $PIECE   data: $PREP_DIR   review filter: ${REVIEW_CSV:-none (all images)}"
+echo "Classes: $CLASSES   ce_weight: $CE   lr: $LR   epochs: $STAGE1 + $EPOCHS"
 
 if [ ! -d "$PREP_DIR" ]; then
-    python scripts/export_fluorescent.py "$DATA_DIR" --prep="$PREP" --piece_size="$PIECE" --out_dir="$PREP_DIR" || exit 1
+    python scripts/export_fluorescent.py "$DATA_DIR" --prep="$PREP" --piece_size="$PIECE" --out_dir="$PREP_DIR" \
+        "${REVIEW_ARGS[@]}" || { rm -rf "$PREP_DIR"; exit 1; }
 fi
 
 python scripts/supconloss_test_old.py \
-    --classes=fluorescent \
+    --classes="$CLASSES" \
     --data_dir="$PREP_DIR" \
     --image_size="$PIECE" \
-    --stage1_epochs=60 \
-    --epochs=15 \
+    --stage1_epochs="$STAGE1" \
+    --epochs="$EPOCHS" \
     --batch_size=128 \
-    --ce_weight=0.5
+    --learning_rate="$LR" \
+    --ce_weight="$CE"
