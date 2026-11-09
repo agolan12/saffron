@@ -43,12 +43,16 @@ REVIEW_CSV=${REVIEW_CSV:-}
 # Class set, as in the training slurm (default: every folder its own class):
 #     sbatch --export=ALL,CLASSES=fluorescent_ogd_3_vs_control <this file>
 CLASSES=${CLASSES:-}
-EXTRA_ARGS=()
+# The same cross-validation by sample as the training slurm (all folds in one task, pooled):
+#     sbatch --export=ALL,SPLIT=sample,N_FOLDS=4,... <this file>
+SPLIT=${SPLIT:-image}
+N_FOLDS=${N_FOLDS:-4}
+EXTRA_ARGS=(--split_by="$SPLIT" --n_folds="$N_FOLDS")
 [ -n "$CLASSES" ] && EXTRA_ARGS+=(--classes="$CLASSES")
 if [ -n "$REVIEW_CSV" ]; then
     [ -f "$REVIEW_CSV" ] || { echo "REVIEW_CSV not found: $REVIEW_CSV"; exit 1; }
     EXTRA_ARGS+=(--review_csv="$REVIEW_CSV" --keep good)
 fi
-echo "Prep: $PREP   classes: ${CLASSES:-every folder}   review filter: ${REVIEW_CSV:-none (all images)}"
+echo "Prep: $PREP   classes: ${CLASSES:-every folder}   split: $SPLIT   review filter: ${REVIEW_CSV:-none (all images)}"
 
 python scripts/shortcut_baseline_fluorescent.py "$DATA_DIR" --prep="$PREP" "${EXTRA_ARGS[@]}"

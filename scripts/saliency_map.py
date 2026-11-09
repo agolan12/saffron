@@ -9,8 +9,18 @@ For a few validation images per class it draws three panels:
     3. occlusion map: how much the model's confidence drops when a 64x64 square of the
                       image is covered up (coarse, but the most direct evidence)
 and prints one number per image: the share of the gradient map that falls on cell pixels
-(the brightest 15% of the image). If the model ignored the difference between cells and
-background that share would be 0.15; well above it means the model looks at the cells.
+(the white pixels of a mask, otherwise the brightest 15% of the image). If the model ignored
+the difference between cells and background, that share would equal the share of the image
+the cell pixels cover; well above it means the model looks at the cells.
+
+--randomize_weights adds the same two maps for an untrained network of the same shape (random
+weights) and prints how alike the trained and random gradient maps are (Spearman rank
+correlation, -1..1). Some gradient maps look almost the same for a random network, because they
+mostly show the image's edges; a map is only evidence about the trained model where it differs
+from the random one (Adebayo et al. 2018, "Sanity checks for saliency maps").
+
+For runs trained with --split_by sample, pass the same --split_by sample --n_folds --fold, so the
+images shown are from that run's validation samples.
 
 Usage (on Hyak, from the saffron folder), with weights saved by supconloss_test_old.py:
     python scripts/saliency_map.py --weights weights/job12345_task0_final.pt
@@ -35,12 +45,32 @@ from torchvision.transforms import v2
 # Add src to path so we can import saffron (script lives in scripts/, package in src/)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from saffron.data.datasets import MicrogliaDataset, split_indices_by_image
+from saffron.data.datasets import MicrogliaDataset, split_indices
 from supconloss_test_old import (CLASS_SETS, DEFAULT_DATA_DIR, ConfigurableMicrogliaCNN, EqualizeHistogram,
                                  LiThreshold, device_check)
 from image_prep import LI_BACKGROUND_SIGMA, LI_MIN_SIZE, LI_MAX_HOLE
 
 CELL_SHARE = 0.15   # the brightest 15% of pixels are treated as "cell"
+
+
+def cell_pixels(image, li_threshold=False):
+    """Boolean map of "cell" pixels: the white part of a mask, otherwise the brightest 15%.
+
+    An image counts as a mask when at least 95% of its pixels sit at its lowest or highest value
+    (exported Li masks are 0/1; resizing can blur a few edge pixels)."""
+    low, high = image.min(), image.max()
+    is_mask = high > low and np.mean((image == low) | (image == high)) >= 0.95
+    if li_threshold or is_mask:
+        return image > (low + high) / 2
+    return image >= np.quantile(image, 1 - CELL_SHARE)
+
+
+def rank_correlation(a, b):
+    """Spearman correlation of two maps (ties averaged); nan when either map is constant."""
+    from scipy.stats import spearmanr
+    if np.ptp(a) == 0 or np.ptp(b) == 0:
+        return float("nan")
+    return float(spearmanr(a.ravel(), b.ravel())[0])
 
 
 def gradient_map(model, image, target, samples=20, noise=0.1):
@@ -96,6 +126,12 @@ def main():
     parser.add_argument("--pool", default="mixed", choices=["mixed", "avg", "max"])
     parser.add_argument("--pool_size", default=12, type=int)
     parser.add_argument("--image_size", default=512, type=int, help="the --image_size value the run was trained with")
+    parser.add_argument("--split_by", default="image", choices=["image", "sample"],
+                        help="the --split_by the run was trained with")
+    parser.add_argument("--n_folds", default=4, type=int, help="the --n_folds the run was trained with")
+    parser.add_argument("--fold", default=0, type=int, help="the --fold the run was trained with")
+    parser.add_argument("--randomize_weights", action="store_true",
+                        help="also draw the maps of an untrained network (sanity check, see above)")
     args = parser.parse_args()
     output = args.output or f"saliency_{Path(args.weights).stem}.png"
     LABELS, MERGE_MAP = CLASS_SETS[args.classes]
@@ -109,6 +145,12 @@ def main():
                                      num_classes=len(LABELS))
     model.load_state_dict(torch.load(args.weights, map_location="cpu"))
     model.to(device).eval()
+    random_model = None
+    if args.randomize_weights:
+        torch.manual_seed(args.seed)               # the same random network every time
+        random_model = ConfigurableMicrogliaCNN(kernel_size=args.kernel_size, stride=args.stride, pool=args.pool,
+                                                pool_size=args.pool_size, input_size=args.image_size,
+                                                num_classes=len(LABELS)).to(device).eval()
 
     # Same preprocessing as validation in the training script
     steps = [EqualizeHistogram()] if args.equalize else []
@@ -130,7 +172,8 @@ def main():
             v2.Grayscale(num_output_channels=1),
             v2.ToDtype(torch.float32, scale=True),
         ]))
-    _, val_indices = split_indices_by_image(dataset, val_split=0.2, seed=42)
+    _, val_indices = split_indices(dataset, split=args.split_by, val_split=0.2, n_folds=args.n_folds,
+                                   fold=args.fold, seed=42)
 
     rng = np.random.default_rng(args.seed)
     chosen = []
@@ -138,10 +181,12 @@ def main():
         of_class = [i for i in val_indices if dataset.samples[i][1] == class_index]
         chosen += list(rng.choice(of_class, size=min(args.per_class, len(of_class)), replace=False))
 
-    columns = 4 if show_original else 3
+    columns = (4 if show_original else 3) + (2 if random_model is not None else 0)
     fig, axes = plt.subplots(len(chosen), columns, figsize=(3.5 * columns, 3.6 * len(chosen)), squeeze=False)
-    print(f"\n{'true':<10}{'predicted':<11}{'confidence':>11}{'gradient on cells':>19}{'largest occlusion drop':>24}   file")
+    print(f"\n{'true':<10}{'predicted':<11}{'confidence':>11}{'gradient on cells':>19}{'largest occlusion drop':>24}"
+          + (f"{'trained vs random':>19}" if random_model is not None else "") + "   file")
     shares = {label: [] for label in LABELS}
+    similarities = []
     for row, index in zip(axes, chosen):
         image, label = dataset[int(index)]
         image = image.to(device)
@@ -153,15 +198,22 @@ def main():
         occlusion = occlusion_map(model, image, predicted).cpu().numpy()
         shown = (image.squeeze(0).cpu().numpy() * 0.5 + 0.5).clip(0, 1)   # undo Normalize for display
 
-        # "cell" pixels: the white part of a Li mask, otherwise the brightest 15% of the image
-        cells = shown > 0.5 if args.li_threshold else shown >= np.quantile(shown, 1 - CELL_SHARE)
+        cells = cell_pixels(shown, args.li_threshold)
         chance = cells.mean()                          # the share expected if the model ignored cells
         on_cells = gradients[cells].sum() / gradients.sum()
         shares[LABELS[label]].append((on_cells, chance))
         path = Path(dataset.samples[int(index)][0])
         species = path.relative_to(dataset.data_dir).parts[0]
+        similarity_text = ""
+        if random_model is not None:
+            # the same class as the trained model's prediction, so the two maps answer the same question
+            random_gradients = gradient_map(random_model, image, predicted).cpu().numpy()
+            random_occlusion = occlusion_map(random_model, image, predicted).cpu().numpy()
+            similarity = rank_correlation(gradients, random_gradients)
+            similarities.append(similarity)
+            similarity_text = f"{similarity:>19.2f}"
         print(f"{LABELS[label]:<10}{LABELS[predicted]:<11}{probabilities[predicted].item():>11.2f}{on_cells:>19.2f}"
-              f"{occlusion.max():>24.2f}   {species}/{path.name[:60]}")
+              f"{occlusion.max():>24.2f}{similarity_text}   {species}/{path.name[:60]}")
 
         title = (f"{species}: true {LABELS[label]}, predicted {LABELS[predicted]} "
                  f"({probabilities[predicted].item():.2f})")
@@ -186,6 +238,16 @@ def main():
         row[2].imshow(occlusion, cmap="coolwarm", alpha=0.6, vmin=-limit, vmax=limit)
         row[2].set_title(f"occlusion: red = covering lowers confidence (max drop {occlusion.max():.2f})",
                          fontsize=8, loc="left")
+        if random_model is not None:
+            row[3].imshow(shown, cmap="gray", vmin=0, vmax=1)
+            row[3].imshow(random_gradients, cmap="magma", alpha=0.75, vmax=np.quantile(random_gradients, 0.995))
+            row[3].set_title(f"RANDOM network, gradient (rank corr. with trained {similarity:.2f})",
+                             fontsize=8, loc="left")
+            random_limit = max(abs(random_occlusion).max(), 0.05)
+            row[4].imshow(shown, cmap="gray", vmin=0, vmax=1)
+            row[4].imshow(random_occlusion, cmap="coolwarm", alpha=0.6, vmin=-random_limit, vmax=random_limit)
+            row[4].set_title(f"RANDOM network, occlusion (max drop {random_occlusion.max():.2f})",
+                             fontsize=8, loc="left")
     for ax in axes.flat:
         ax.axis("off")
 
@@ -199,6 +261,11 @@ def main():
             on, expected = np.array(values).T
             print(f"  {label:<10} on cells {on.mean():.2f} (range {on.min():.2f} to {on.max():.2f})"
                   f"   cells cover {expected.mean():.2f} of the image")
+    if similarities:
+        print(f"\nTrained vs random gradient maps, rank correlation: mean {np.nanmean(similarities):.2f} "
+              f"(range {np.nanmin(similarities):.2f} to {np.nanmax(similarities):.2f}).\n"
+              "Near 1: the gradient map mostly shows the image, not what training taught the model; rely on\n"
+              "the occlusion maps instead. Low: the trained model's map is its own.")
 
 
 if __name__ == "__main__":

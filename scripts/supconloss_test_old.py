@@ -16,7 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from image_prep import li_mask, LI_BACKGROUND_SIGMA, LI_MIN_SIZE, LI_MAX_HOLE
 from shortcut_baseline_fluorescent import FLUORESCENT_CLASS_SETS
 from saffron.io import data_io
-from saffron.data.datasets import MicrogliaDataset, generate_dataloaders, load_image, image_shape, IMAGE_SUFFIXES
+from saffron.data.datasets import (MicrogliaDataset, generate_dataloaders, load_image, image_shape, IMAGE_SUFFIXES,
+                                   sample_id)
+from pool_folds import summarize, write_predictions, balanced_accuracy
 from saffron.data import data_processing
 from saffron.models.torch_models import MicrogliaCNN
 from saffron.models.loss_functions import SupConLoss
@@ -234,7 +236,8 @@ def device_check(req_dev):
 
 
 def make_dataloaders(batch_size=32, equalize=False, li_threshold=False, classes="all",
-                     data_dir=DEFAULT_DATA_DIR, li_settings=None, binarize=False, image_size=512):
+                     data_dir=DEFAULT_DATA_DIR, li_settings=None, binarize=False, image_size=512,
+                     split="image", n_folds=4, fold=0):
 
     # Optional first step for both training and validation, applied to the image as stored
     # (before resizing and augmentation), so the brightness shortcut is removed at the source.
@@ -320,11 +323,13 @@ def make_dataloaders(batch_size=32, equalize=False, li_threshold=False, classes=
     data_train, data_val = generate_dataloaders(
         microglia_dataset, num_workers=2, batch_size=batch_size,
         train_transform=train_transforms, val_transform=val_transforms,
+        split=split, n_folds=n_folds, fold=fold,
     )
     if species_labels:
         _, species_val = generate_dataloaders(
             species_dataset, num_workers=2, batch_size=batch_size,
             train_transform=train_transforms, val_transform=val_transforms,
+            split=split, n_folds=n_folds, fold=fold,
         )
 
     return data_train, data_val, species_val
@@ -438,6 +443,59 @@ def freeze_backbone(model, head_only=False):
     else:
         print("[+] Backbone frozen. Only fc stays trainable.")
 
+def evaluate(model, embedding_model, data_val, loss_func, device):
+    """
+    Validation in one pass over data_val. Returns a dict with
+        loss               SupCon loss of all validation embeddings together, not a mean of batch
+                           losses, so it does not depend on the batch size or on a small last batch
+        accuracy           share of pieces predicted correctly
+        balanced_accuracy  mean recall over the classes (1 / number of classes for guessing)
+        true, predicted    label indices per piece, in the order of data_val
+    """
+    model.eval()
+    embedding_model.eval()
+    embeddings, predicted, true = [], [], []
+    with torch.no_grad():
+        for images, labels in data_val:
+            images = images.to(device)
+            embeddings.append(embedding_model(images).cpu())
+            predicted.append(model(images).argmax(dim=1).cpu())
+            true.append(labels.cpu())
+    embeddings = torch.cat(embeddings)
+    predicted = torch.cat(predicted).numpy()
+    true = torch.cat(true).numpy()
+    return {
+        "loss": loss_func(embeddings, torch.from_numpy(true)).item(),
+        "accuracy": float((predicted == true).mean()),
+        "balanced_accuracy": balanced_accuracy(true, predicted),
+        "true": true,
+        "predicted": predicted,
+    }
+
+
+def report_validation(result, data_val, class_names, stage, run_name, classes, data_dir, fold):
+    """Print the validation result of the last epoch of a stage and save it to predictions/<run>_stage<n>.csv."""
+    subset = data_val.dataset                    # TransformedSubset: its indices are in data_val order
+    dataset = subset.dataset
+    rows = []
+    for index, true, predicted in zip(subset.indices, result["true"], result["predicted"]):
+        path = Path(dataset.samples[index][0])
+        try:
+            sample = sample_id(path)
+        except ValueError:                       # file names without a sample ID (species data)
+            sample = "(none)"
+        rows.append({"file": str(path.relative_to(dataset.data_dir)), "sample": sample,
+                     "folder": path.relative_to(dataset.data_dir).parts[0],
+                     "true": class_names[true], "predicted": class_names[predicted], "fold": str(fold),
+                     "stage": stage, "classes": classes, "data_dir": str(data_dir), "run": run_name})
+    print(f"\n[+] Validation at the end of stage {stage} (last epoch):")
+    for line in summarize(rows, class_names):
+        print(("\n" if line.startswith("\n") else "") + "    " + line.lstrip("\n"))
+    out = Path("predictions") / f"{run_name}_stage{stage}.csv"
+    write_predictions(out, rows)
+    print(f"[+] Validation predictions saved to {out}\n")
+
+
 def train(
     model,
     embedding_model,
@@ -461,6 +519,8 @@ def train(
     train_loss_epoch = []
     val_loss_epoch = []
     val_accuracy_epoch = []
+    val_balanced_epoch = []
+    result = None
 
     model.to(device)
     embedding_model.to(device)
@@ -505,26 +565,10 @@ def train(
             torch.save(model.state_dict(), weights)
 
         # Validation once per epoch (not every batch)
-        model.eval()
-        embedding_model.eval()
-        val_pred = []
-        val_lbls = []
-        val_loss_list = []
-        with torch.no_grad():
-            for _, (images, labels) in enumerate(data_val):
-                images = images.to(device)
-                labels = labels.to(device)
-                val_embeddings = embedding_model(images)
-                val_loss_list.append(loss_func(val_embeddings, labels).item())
-                # Accuracy from full model logits
-                logits = model(images)
-                val_pred += logits.argmax(dim=1).cpu().tolist()
-                val_lbls += labels.cpu().tolist()
-
-        val_pred = np.array(val_pred)
-        val_lbls = np.array(val_lbls)
-        val_accuracy_epoch.append((val_pred == val_lbls).mean())
-        val_loss_epoch.append(np.mean(val_loss_list))
+        result = evaluate(model, embedding_model, data_val, loss_func, device)
+        val_accuracy_epoch.append(result["accuracy"])
+        val_balanced_epoch.append(result["balanced_accuracy"])
+        val_loss_epoch.append(result["loss"])
         train_loss_epoch.append(np.mean(train_loss_batch))
 
         # Learning-rate schedule (if any) advances once per epoch
@@ -543,9 +587,11 @@ def train(
                 task_id=task_id,
             )
 
+        # plot_runs.py reads these three from the .err file, in this order
         pbar_epoch.set_postfix({
             "Loss": val_loss_epoch[-1],
             "Acc": val_accuracy_epoch[-1],
+            "BalAcc": val_balanced_epoch[-1],
         })
 
         # Plot training curves
@@ -572,7 +618,7 @@ def train(
         plt.savefig('fig/training.png')
         plt.close()
 
-    return val_accuracy_epoch, val_loss_epoch, train_loss_epoch
+    return val_accuracy_epoch, val_loss_epoch, train_loss_epoch, val_balanced_epoch, result
 
 
 if __name__ == "__main__":
@@ -671,6 +717,20 @@ if __name__ == "__main__":
 					action="store_true",
 					help="Stage 2 trains only the last layer (500 -> classes) and leaves the embedding layer "
 					     "frozen. Default: both FC layers train (the original).")
+    parser.add_argument("--split_by",
+					default="image",
+					choices=["image", "sample"],
+					help="image: 20%% of each folder's images for validation (the original). sample: "
+					     "cross-validation by sample (all fields of a sample on one side); use with "
+					     "--n_folds and --fold.")
+    parser.add_argument("--n_folds",
+					default=4,
+					type=int,
+					help="--split_by sample: number of cross-validation folds (at most the fewest samples in a folder).")
+    parser.add_argument("--fold",
+					default=0,
+					type=int,
+					help="--split_by sample: which fold (0..n_folds-1) is the validation set.")
     parser.add_argument("--stage2_lr",
 					default=None,
 					type=float,
@@ -739,7 +799,9 @@ if __name__ == "__main__":
         classes=args.classes, data_dir=args.data_dir, binarize=args.binarize, image_size=args.image_size,
         li_settings={"background_sigma": args.li_background_sigma, "min_size": args.li_min_size,
                      "max_hole": args.li_max_hole},
+        split=args.split_by, n_folds=args.n_folds, fold=args.fold,
     )
+    class_names = CLASS_SETS[args.classes][0]
     embedding_model = MicrogliaEmbeddingWrapper(model)  # 500-d normalized embeddings for SupConLoss
     if SupConLoss is None:
         raise ImportError("Install pytorch-metric-learning for SupConLoss: pip install -e '.[torch]'")
@@ -762,7 +824,7 @@ if __name__ == "__main__":
 
     # --- Stage 1: SupCon + CE, all layers trainable ---
     print(f"[+] Stage 1: Supervised contrastive learning ({args.stage1_epochs} epochs, ce_weight={args.ce_weight})")
-    val_accuracy, val_loss, train_loss = train(
+    val_accuracy, val_loss, train_loss, val_balanced, last_result = train(
         model=model,
         embedding_model=embedding_model,
         weights=args.weights,
@@ -781,6 +843,8 @@ if __name__ == "__main__":
     stage1_path = weights_dir / f"{run_name}_stage1.pt"
     torch.save(model.state_dict(), stage1_path)
     print(f"[+] Stage 1 weights saved to {stage1_path}")
+    if last_result is not None:
+        report_validation(last_result, data_val, class_names, 1, run_name, args.classes, args.data_dir, args.fold)
 
     # --- Stage 2: Freeze backbone, fine-tune head ---
     print("[+] Stage 2: Fine-tuning classifier head")
@@ -794,7 +858,7 @@ if __name__ == "__main__":
         weight_decay=args.decay
     )
 
-    val_accuracy_ft, val_loss_ft, train_loss_ft = train(
+    val_accuracy_ft, val_loss_ft, train_loss_ft, val_balanced_ft, last_result = train(
         model=model,
         embedding_model=embedding_model,
         weights=args.weights,
@@ -813,6 +877,8 @@ if __name__ == "__main__":
     final_path = weights_dir / f"{run_name}_final.pt"
     torch.save(model.state_dict(), final_path)
     print(f"[+] Final weights saved to {final_path}")
+    if last_result is not None:
+        report_validation(last_result, data_val, class_names, 2, run_name, args.classes, args.data_dir, args.fold)
 
     # --- Final embeddings ---
     print("[+] Generating final embeddings")

@@ -49,7 +49,8 @@ from sklearn.metrics import balanced_accuracy_score, confusion_matrix
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from image_prep import li_mask, LI_BACKGROUND_SIGMA
-from saffron.data.datasets import split_indices_by_image
+from saffron.data.datasets import split_indices, sample_id
+from pool_folds import summarize
 
 PREPS = ["raw", "normalised", "denoised", "li_raw", "li_denoised", "li_saved"]
 BINS = 32                                        # same numbers as shortcut_baseline.py
@@ -139,6 +140,10 @@ def main():
     parser.add_argument("--review_csv", help="review_images.py labels; only images labelled --keep are used")
     parser.add_argument("--keep", nargs="+", default=["good"],
                         help="review labels to keep with --review_csv (default: good)")
+    parser.add_argument("--split_by", default="image", choices=["image", "sample"],
+                        help="image: one 80/20 split by image (the original); sample: cross-validation by "
+                             "sample, as supconloss_test_old.py --split_by sample (all folds, results pooled)")
+    parser.add_argument("--n_folds", default=4, type=int, help="--split_by sample: number of folds")
     parser.add_argument("--classes", choices=sorted(FLUORESCENT_CLASS_SETS),
                         help="class set, as --classes in supconloss_test_old.py "
                              "(default: every folder is its own class)")
@@ -196,11 +201,16 @@ def main():
     del images
 
     dataset = SimpleNamespace(samples=kept, data_dir=data_dir)
-    train_indices, val_indices = split_indices_by_image(dataset, val_split=0.2, seed=42)
     labels = np.array([label for _, label in kept])
     folders = np.array([Path(path).parent.name for path, _ in kept])
-    x_train, y_train = features[train_indices], labels[train_indices]
-    x_val, y_val = features[val_indices], labels[val_indices]
+    # One (train, validation) pair for --split_by image; one per fold for --split_by sample, the same
+    # folds as supconloss_test_old.py --split_by sample. Every image is validated at most once, so
+    # the predictions of all folds are pooled and scored together.
+    n_folds = args.n_folds if args.split_by == "sample" else 1
+    folds = [split_indices(dataset, split=args.split_by, val_split=0.2, n_folds=args.n_folds, fold=k, seed=42)
+             for k in range(n_folds)]
+    val_indices = np.concatenate([val for _, val in folds])
+    y_val = labels[val_indices]
 
     lines = []
 
@@ -220,7 +230,13 @@ def main():
     if review is not None:
         out(f"review filter: {args.review_csv}, kept {'/'.join(args.keep)}; left out: "
             + (", ".join(f"{n} {label}" for label, n in sorted(dropped.items())) or "none"))
-    out(f"train images: {len(train_indices)}   validation images: {len(val_indices)}")
+    if args.split_by == "sample":
+        out(f"split: {n_folds}-fold cross-validation by sample; every image validated once, results pooled")
+        for k, (train, val) in enumerate(folds):
+            out(f"  fold {k}: train {len(train)} images, validation {len(val)} images, samples "
+                + ", ".join(sorted({sample_id(kept[i][0]) for i in val})))
+    else:
+        out(f"train images: {len(folds[0][0])}   validation images: {len(val_indices)}")
     out(f"always guessing the largest class: accuracy {np.bincount(y_val).max() / len(y_val):.3f}")
 
     versions = [("mean", slice(0, 1)), ("mean + spread", slice(0, 2)), ("histogram", slice(2, None))]
@@ -230,14 +246,17 @@ def main():
     for name, columns in versions:
         print(f"training '{name}' ...", flush=True)
         # Same classifier as shortcut_baseline.py (n_jobs=1: no OpenMP, which hung on Hyak there)
-        model = RandomForestClassifier(n_estimators=300, min_samples_leaf=5, class_weight="balanced",
-                                       n_jobs=1, random_state=0)
-        model.fit(x_train[:, columns], y_train)
-        predicted = model.predict(x_val[:, columns])
+        predicted = []
+        for train, val in folds:
+            model = RandomForestClassifier(n_estimators=300, min_samples_leaf=5, class_weight="balanced",
+                                           n_jobs=1, random_state=0)
+            model.fit(features[train][:, columns], labels[train])
+            predicted.append(model.predict(features[val][:, columns]))
+        predicted = np.concatenate(predicted)
         predictions[name] = predicted
         recall = [np.mean(predicted[y_val == c] == c) if np.any(y_val == c) else np.nan
                   for c in range(len(class_names))]
-        out(f"{name:<16}{x_train[:, columns].shape[1]:>8}{np.mean(predicted == y_val):>10.3f}"
+        out(f"{name:<16}{features[:, columns].shape[1]:>8}{np.mean(predicted == y_val):>10.3f}"
             f"{balanced_accuracy_score(y_val, predicted):>10.3f}   "
             + "  ".join(f"{r:>{max(len(c), 5)}.3f}" for r, c in zip(recall, class_names)))
     out(f"\n'balanced' is the average of the per-class recalls; pure guessing gives {1 / len(class_names):.3f}.")
@@ -249,6 +268,17 @@ def main():
     for condition, row in zip(class_names, matrix):
         out(f"{condition:<{width}}" + "".join(f"{n:>{width}}" for n in row))
 
+    if args.split_by == "sample":
+        out("\nHistogram version, per fold and per sample:")
+        fold_of = np.concatenate([[k] * len(val) for k, (_, val) in enumerate(folds)])
+        rows = [{"file": kept[i][0], "sample": sample_id(kept[i][0]), "folder": folders[i],
+                 "true": class_names[labels[i]], "predicted": class_names[p], "fold": str(k)}
+                for i, p, k in zip(val_indices, predictions["histogram"], fold_of)]
+        summary = summarize(rows, class_names)
+        start = next(n for n, line in enumerate(summary) if "per fold:" in line or "per sample" in line)
+        for line in summary[start:]:          # the overall numbers and matrix are already above
+            out(line.strip("\n") if line.startswith("\n") else line)
+
     out("\nAverage value per condition (all images; for masks, the share of pixels marked as cell)")
     for condition in conditions:
         means = features[folders == condition, 0]
@@ -257,6 +287,7 @@ def main():
                 f"{np.percentile(means, 25):.4f} to {np.percentile(means, 75):.4f}")
 
     suffix = f"_{args.classes}" if args.classes else ""
+    suffix += f"_sample{n_folds}fold" if args.split_by == "sample" else ""
     suffix += f"_{'+'.join(args.keep)}" if review is not None else ""   # don't overwrite the all-images result
     out_txt = Path(args.out_dir) / f"shortcut_fluorescent_{args.prep}{suffix}.txt"
     out_txt.parent.mkdir(parents=True, exist_ok=True)

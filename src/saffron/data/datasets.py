@@ -1,3 +1,4 @@
+import re
 import zlib
 from collections import defaultdict
 
@@ -250,6 +251,75 @@ def split_indices_by_image(dataset, val_split=0.2, seed=42):
     return sorted(train_indices), val_indices
 
 
+# The sample (animal / slice) a file comes from: everything before the magnification,
+# e.g. '4-56-10_40x_cortex_1_top_left.npy' -> '4-56-10', '4-59_1_40x_thalamus_2.tif' -> '4-59_1'
+SAMPLE_ID = re.compile(r"^(.+?)_\d+x_")
+
+
+def sample_id(filepath):
+    """Sample ID of a file of the fluorescent data set (the text before '_<N>x_')."""
+    name = Path(filepath).name
+    match = SAMPLE_ID.match(name)
+    if not match:
+        raise ValueError(f"no sample ID in {name!r}: expected a name like '4-56-10_40x_...'")
+    return match.group(1)
+
+
+def split_indices_by_sample(dataset, n_folds=4, fold=0, seed=42):
+    """
+    Cross-validation split by sample: fold ``fold`` of ``n_folds`` is the validation set.
+
+    All files of one sample (every field and every piece) land on the same side, so the
+    validation score measures new samples, not new fields of samples already seen.
+    Within each top-level folder the samples are shuffled (seeded per folder, as in
+    split_indices_by_image) and dealt out to the folds in turn, so every fold holds out
+    about 1/n_folds of every folder's samples, and over the n_folds folds every sample
+    is in validation exactly once.
+
+    A folder with fewer samples than n_folds (e.g. ogd_1.5 after removing bad images) is
+    allowed: its samples go to the first folds, and the remaining folds validate on none of
+    it. A note is printed, since a fold's own score then lacks that folder; the pooled score
+    over all folds still covers every sample once. Raises ValueError when a file name has no
+    sample ID or n_folds < 2.
+
+    Returns:
+        train_indices, val_indices (val in a fixed shuffled order, as in split_indices_by_image)
+    """
+    if n_folds < 2:
+        raise ValueError(f"n_folds must be at least 2, got {n_folds}")
+    if not 0 <= fold < n_folds:
+        raise ValueError(f"fold must be 0..{n_folds - 1}, got {fold}")
+    # folder -> sample -> indices of that sample's files
+    samples_by_folder = defaultdict(lambda: defaultdict(list))
+    for idx, (filepath, _) in enumerate(dataset.samples):
+        folder = Path(filepath).relative_to(dataset.data_dir).parts[0]
+        samples_by_folder[folder][sample_id(filepath)].append(idx)
+
+    train_indices, val_indices = [], []
+    for folder in sorted(samples_by_folder):
+        samples = sorted(samples_by_folder[folder])
+        if len(samples) < n_folds:
+            print(f"Note: {folder} has {len(samples)} samples, fewer than {n_folds} folds; "
+                  f"folds {len(samples)}..{n_folds - 1} validate on none of it")
+        rng = np.random.default_rng([seed, zlib.crc32(folder.encode())])
+        rng.shuffle(samples)
+        for i, sample in enumerate(samples):
+            (val_indices if i % n_folds == fold else train_indices).extend(samples_by_folder[folder][sample])
+
+    val_indices = sorted(val_indices)
+    np.random.default_rng(seed).shuffle(val_indices)
+    return sorted(train_indices), val_indices
+
+
+def split_indices(dataset, split="image", val_split=0.2, n_folds=4, fold=0, seed=42):
+    """split='image': split_indices_by_image; split='sample': split_indices_by_sample."""
+    if split == "image":
+        return split_indices_by_image(dataset, val_split=val_split, seed=seed)
+    if split == "sample":
+        return split_indices_by_sample(dataset, n_folds=n_folds, fold=fold, seed=seed)
+    raise ValueError(f"split must be 'image' or 'sample', got {split!r}")
+
+
 class TransformedSubset(Dataset):
     """
     The samples of ``dataset`` at ``indices``, with an extra transform applied
@@ -273,15 +343,17 @@ class TransformedSubset(Dataset):
 
 
 def generate_dataloaders(dataset, num_workers=2, batch_size=32, val_split=0.2,
-                         train_transform=None, val_transform=None):
+                         train_transform=None, val_transform=None, split="image", n_folds=4, fold=0):
     """
-    Split dataset into train/val by image and create DataLoaders.
-    
+    Split dataset into train/val by image (or by sample) and create DataLoaders.
+
     Args:
         dataset: MicrogliaDataset instance
         num_workers: Number of worker processes
         batch_size: Batch size
-        val_split: Fraction of images (per folder) for validation
+        val_split: Fraction of images (per folder) for validation (split='image' only)
+        split, n_folds, fold: split='sample' validates on fold ``fold`` of ``n_folds``
+            cross-validation folds of whole samples (see split_indices_by_sample)
         train_transform: Transforms for training images only (put random
             augmentation here)
         val_transform: Transforms for validation images only (resize/normalize,
@@ -296,8 +368,12 @@ def generate_dataloaders(dataset, num_workers=2, batch_size=32, val_split=0.2,
     """
     from torch.utils.data import WeightedRandomSampler
     
-    # Split by image, not by file: quadrants of one image must not straddle train/val
-    train_indices, val_indices = split_indices_by_image(dataset, val_split=val_split, seed=42)
+    # Split by image (or sample), not by file: quadrants of one image must not straddle train/val
+    train_indices, val_indices = split_indices(dataset, split=split, val_split=val_split,
+                                               n_folds=n_folds, fold=fold, seed=42)
+    if split == "sample":
+        val_samples = sorted({sample_id(dataset.samples[i][0]) for i in val_indices})
+        print(f"Validation fold {fold} of {n_folds}: samples {', '.join(val_samples)}")
     train_dataset = TransformedSubset(dataset, train_indices, train_transform)
     val_dataset = TransformedSubset(dataset, val_indices, val_transform)
     
